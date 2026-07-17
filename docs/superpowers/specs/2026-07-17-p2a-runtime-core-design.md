@@ -119,7 +119,7 @@ The `loop-engineer.cli:main` entry point from P1's `pyproject.toml` is implement
 
 ## 9. Acceptance for P2a
 
-1. A goal file compiles to a validated `Plan`; `plan validate` rejects cyclic / overlapping-unordered / malformed input with the right exit class.
+1. A goal file compiles to a validated `Plan`; `plan validate` rejects cyclic / malformed input with exit `2`. Unordered `Allowed Files` overlap is rejected at **claim time** (exit `5`, §5.2) in P2a; compile/scheduler-time overlap detection (parent §13.8, exit `2`) is deferred to P2b when the full scheduler + conflict graph land.
 2. `task claim --provider omx` and `--provider omc` both succeed on independent Tasks; the board records the provider and a digest-only claim.
 3. Two processes claiming overlapping Tasks concurrently: exactly one wins, the other exits `5`; the board never holds two overlapping active Tasks.
 4. Claim/release/complete are idempotent and fail-closed on wrong prior state / wrong token (exit `3`).

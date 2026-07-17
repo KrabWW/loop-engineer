@@ -80,17 +80,18 @@ class BoardStore:
         rid = run_id or paths_mod.derive_run_id(digest)
         bdir = paths_mod.board_dir(Path(common_dir), rid)
         store = cls(bdir, rid, digest)
-        if not store.board_path.exists():
-            scope_map = {n.task.id: list(n.task.allowed_files) for n in plan.nodes}
-            anc = _ancestors(plan)
-            state = BoardState(
-                run_id=rid,
-                plan_digest=digest,
-                tasks={n.task.id: TaskBoardEntry(task_id=n.task.id) for n in plan.nodes},
-                scope=scope_map,
-                ancestors={k: sorted(v) for k, v in anc.items()},
-            )
-            store._save(state)
+        with store._locked():
+            if not store.board_path.exists():
+                scope_map = {n.task.id: list(n.task.allowed_files) for n in plan.nodes}
+                anc = _ancestors(plan)
+                state = BoardState(
+                    run_id=rid,
+                    plan_digest=digest,
+                    tasks={n.task.id: TaskBoardEntry(task_id=n.task.id) for n in plan.nodes},
+                    scope=scope_map,
+                    ancestors={k: sorted(v) for k, v in anc.items()},
+                )
+                store._save(state)
         return store
 
     @contextmanager
