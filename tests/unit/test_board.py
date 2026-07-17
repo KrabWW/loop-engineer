@@ -135,3 +135,12 @@ def test_reset_to_pending_makes_reclaimable(tmp_path):
     e = store.load_state().tasks["T1"]
     assert e.provider == Provider.OMC
     assert e.attempt_id == 2
+
+
+def test_open_is_scope_aware_rejects_overlap(tmp_path):
+    plan = _plan({"T1": ["src/a.py"], "T2": ["src/a.py"]})
+    s1 = BoardStore.from_plan(plan, tmp_path)
+    s1.claim("T1", Provider.OMX, _LEASE)
+    s2 = BoardStore.open(s1.dir)  # read-only open — must still be scope-aware
+    with pytest.raises(ScopeOverlapError):
+        s2.claim("T2", Provider.OMC, _LEASE)

@@ -1,6 +1,8 @@
 """Task board store: atomic, file-locked claim/release/complete (spec P2a §5).
 
-State is persisted as JSON under the Git common dir. Every mutation takes an
+State (including the static per-task allowed-files scope and dependency
+ancestors) is persisted as JSON under the Git common dir, so a BoardStore
+opened read-only via open() is still scope-aware. Every mutation takes an
 exclusive fcntl.flock around a read-modify-write so independent OMX/OMC
 processes cannot corrupt each other.
 """
@@ -58,51 +60,38 @@ class BoardState(BaseModel):
     run_id: str = Field(min_length=1)
     plan_digest: str = Field(min_length=1)
     tasks: dict[str, TaskBoardEntry]
+    # static (plan-derived), persisted so read-only opens stay scope-aware
+    scope: dict[str, list[str]] = Field(default_factory=dict)
+    ancestors: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class BoardStore:
-    def __init__(
-        self,
-        board_dir: Path,
-        run_id: str,
-        plan_digest: str,
-        scope_map: dict[str, list[str]],
-        ancestors: dict[str, set[str]],
-    ) -> None:
+    def __init__(self, board_dir: Path, run_id: str, plan_digest: str) -> None:
         self.dir = Path(board_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.board_path = self.dir / "board.json"
         self.lock_path = self.dir / "board.lock"
         self._run_id = run_id
         self._plan_digest = plan_digest
-        self._scope_map = scope_map
-        self._ancestors = ancestors
 
     @classmethod
     def from_plan(cls, plan: Plan, common_dir: Path, run_id: str | None = None) -> "BoardStore":
         digest = paths_mod.plan_digest(plan)
         rid = run_id or paths_mod.derive_run_id(digest)
         bdir = paths_mod.board_dir(Path(common_dir), rid)
-        scope_map = {n.task.id: list(n.task.allowed_files) for n in plan.nodes}
-        ancestors = _ancestors(plan)
-        store = cls(bdir, rid, digest, scope_map, ancestors)
+        store = cls(bdir, rid, digest)
         if not store.board_path.exists():
+            scope_map = {n.task.id: list(n.task.allowed_files) for n in plan.nodes}
+            anc = _ancestors(plan)
             state = BoardState(
                 run_id=rid,
                 plan_digest=digest,
                 tasks={n.task.id: TaskBoardEntry(task_id=n.task.id) for n in plan.nodes},
+                scope=scope_map,
+                ancestors={k: sorted(v) for k, v in anc.items()},
             )
             store._save(state)
         return store
-
-    @classmethod
-    def open(cls, board_dir: Path) -> "BoardStore":
-        bdir = Path(board_dir)
-        board_path = bdir / "board.json"
-        if not board_path.exists():
-            raise FileNotFoundError(f"no board at {board_path}")
-        state = BoardState(**json.loads(board_path.read_text()))
-        return cls(bdir, state.run_id, state.plan_digest, {}, {})
 
     @contextmanager
     def _locked(self):
@@ -126,6 +115,15 @@ class BoardStore:
     def load_state(self) -> BoardState:
         return self._load()
 
+    @classmethod
+    def open(cls, board_dir: Path) -> "BoardStore":
+        bdir = Path(board_dir)
+        board_path = bdir / "board.json"
+        if not board_path.exists():
+            raise FileNotFoundError(f"no board at {board_path}")
+        state = BoardState(**json.loads(board_path.read_text()))
+        return cls(bdir, state.run_id, state.plan_digest)
+
     def claim(
         self,
         task_id: str,
@@ -133,12 +131,7 @@ class BoardStore:
         lease: Lease,
         expected_prior: TaskRunStatus = TaskRunStatus.PENDING,
     ) -> str:
-        """Atomically claim a task; return the raw claim token (kept by caller).
-
-        Raises PriorStateError if the task is not in expected_prior, and
-        ScopeOverlapError if the task's allowed files overlap a currently
-        CLAIMED task that is not a dependency ancestor.
-        """
+        """Atomically claim a task; return the raw claim token (kept by caller)."""
         with self._locked():
             state = self._load()
             entry = state.tasks.get(task_id)
@@ -163,15 +156,15 @@ class BoardStore:
             self._save(state)
             return raw_token
 
-    def _check_scope(self, state: "BoardState", task_id: str) -> None:
-        candidate = self._scope_map.get(task_id, [])
-        ancestors = self._ancestors.get(task_id, set())
+    def _check_scope(self, state: BoardState, task_id: str) -> None:
+        candidate = state.scope.get(task_id, [])
+        ancestors = set(state.ancestors.get(task_id, []))
         for other_id, other in state.tasks.items():
             if other_id == task_id or other.status != TaskRunStatus.CLAIMED:
                 continue
             if other_id in ancestors:
                 continue  # dependency-ordered overlap is legal (spec §6.2)
-            other_files = self._scope_map.get(other_id, [])
+            other_files = state.scope.get(other_id, [])
             try:
                 if overlaps(candidate, other_files):
                     raise ScopeOverlapError(
