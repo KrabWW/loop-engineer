@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "EventType": {
+      "description": "Adapter-to-leader event types (spec \u00a77.2).",
+      "enum": [
+        "ACKNOWLEDGED",
+        "STARTED",
+        "PROGRESS",
+        "HEARTBEAT",
+        "BLOCKED",
+        "READY_FOR_REVIEW",
+        "FAILED",
+        "CANCELLED",
+        "SHUTDOWN_ACK"
+      ],
+      "title": "EventType",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "command_id": {
+      "minLength": 1,
+      "title": "Command Id",
+      "type": "string"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_sequence": {
+      "minimum": 1,
+      "title": "Event Sequence",
+      "type": "integer"
+    },
+    "event_type": {
+      "$ref": "#/$defs/EventType"
+    },
+    "lease_generation": {
+      "minimum": 0,
+      "title": "Lease Generation",
+      "type": "integer"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "provider_observation_revision": {
+      "minimum": 1,
+      "title": "Provider Observation Revision",
+      "type": "integer"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "task_id",
+    "command_id",
+    "event_id",
+    "event_sequence",
+    "provider_observation_revision",
+    "lease_generation",
+    "event_type"
+  ],
+  "title": "EventEnvelope",
+  "type": "object"
+}

@@ -1,0 +1,65 @@
+{
+  "schemas": {
+    "claim": {
+      "file": "v1/claim.schema.json",
+      "sha256": "2a7978321d3073adf56760767789b03eea05d2a73f6ed3e61697af73ffb4589f",
+      "version": 1
+    },
+    "command": {
+      "file": "v1/command.schema.json",
+      "sha256": "0c64c0f7421abd7cebd3b7ba8c3f457fa2fbff07f5a7c96a5f8b8326703eeb70",
+      "version": 1
+    },
+    "event": {
+      "file": "v1/event.schema.json",
+      "sha256": "20c01f8b5333d7a7412dc2b821fe06a64f50adcf75c4feff5e18d67eb2fe1b00",
+      "version": 1
+    },
+    "evidence": {
+      "file": "v1/evidence.schema.json",
+      "sha256": "ba6e4eed623bd5cdc356ca5160f32c1efc046a54953d999f36bf593cbf2b2c79",
+      "version": 1
+    },
+    "fence": {
+      "file": "v1/fence.schema.json",
+      "sha256": "aa059f90433e8a6ba663d1747ecbfcb9204cb0476a9a018dcb9666fb0581524b",
+      "version": 1
+    },
+    "goal": {
+      "file": "v1/goal.schema.json",
+      "sha256": "2fb5dbea4070d0d289d3d73e4671541f4fa1f43f19466f6ed3b64f3a50942c6e",
+      "version": 1
+    },
+    "handoff": {
+      "file": "v1/handoff.schema.json",
+      "sha256": "e9582d44f7b5aef7f68672dd0e5c6bc5522a02cecdf5467b73f6a496dfab6288",
+      "version": 1
+    },
+    "lease": {
+      "file": "v1/lease.schema.json",
+      "sha256": "0f7aacaf26a0acbdc8af5ef4d3b31f15bcea258e164a83c214fe91299c43bdb1",
+      "version": 1
+    },
+    "plan": {
+      "file": "v1/plan.schema.json",
+      "sha256": "6228f877916a3113a74227cdea2bac7832f6d9e55fb96f0426e1ffbd427dacc6",
+      "version": 1
+    },
+    "provenance": {
+      "file": "v1/provenance.schema.json",
+      "sha256": "ef29371c6a36dce57331f9df608cc43a17391bb1f736d787968d47c6a05e3df3",
+      "version": 1
+    },
+    "recovery": {
+      "file": "v1/recovery.schema.json",
+      "sha256": "f0ca1f95b8a8674ba03b99a7a4e30e2881d547b538ad940de343538a6ab69411",
+      "version": 1
+    },
+    "task": {
+      "file": "v1/task.schema.json",
+      "sha256": "0bbef8d919bba4031bdbc6dc61b183ec0f3048320d98f00a3d60591b8f9acc47",
+      "version": 1
+    }
+  },
+  "version": 1
+}

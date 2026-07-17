@@ -1,0 +1,177 @@
+{
+  "$defs": {
+    "CommandType": {
+      "description": "Leader-to-adapter command types (spec \u00a77.1).",
+      "enum": [
+        "START_TASK",
+        "CONTINUE_TASK",
+        "REQUEST_FIX",
+        "REQUEST_EVIDENCE",
+        "RELEASE_FOR_OMX_FIX",
+        "CANCEL_TASK",
+        "SHUTDOWN_EXECUTOR"
+      ],
+      "title": "CommandType",
+      "type": "string"
+    },
+    "CommonState": {
+      "description": "Sole normative common-state lifecycle (spec \u00a77.3).",
+      "enum": [
+        "ready",
+        "claimed",
+        "omc_starting",
+        "omc_executing",
+        "blocked",
+        "ready_for_omx_review",
+        "omx_reviewing",
+        "correction_requested",
+        "writer_quiescing",
+        "promoting",
+        "post_promotion_review",
+        "omx_fixing",
+        "omx_verified",
+        "finishing",
+        "merged",
+        "post_merge_verification_failed",
+        "failed",
+        "cancelled",
+        "integration_cancelled"
+      ],
+      "title": "CommonState",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "allowed_file_scope_hash": {
+      "title": "Allowed File Scope Hash",
+      "type": "string"
+    },
+    "cancellation_policy": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cancellation Policy"
+    },
+    "causation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Causation Id"
+    },
+    "claim_generation": {
+      "minimum": 0,
+      "title": "Claim Generation",
+      "type": "integer"
+    },
+    "command_id": {
+      "minLength": 1,
+      "title": "Command Id",
+      "type": "string"
+    },
+    "command_revision": {
+      "minimum": 1,
+      "title": "Command Revision",
+      "type": "integer"
+    },
+    "command_type": {
+      "$ref": "#/$defs/CommandType"
+    },
+    "deadline": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Deadline"
+    },
+    "evidence_requirements": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Evidence Requirements",
+      "type": "array"
+    },
+    "expected_task_state": {
+      "$ref": "#/$defs/CommonState"
+    },
+    "instruction": {
+      "minLength": 1,
+      "title": "Instruction",
+      "type": "string"
+    },
+    "lease_generation": {
+      "minimum": 0,
+      "title": "Lease Generation",
+      "type": "integer"
+    },
+    "omx_team_name": {
+      "minLength": 1,
+      "title": "Omx Team Name",
+      "type": "string"
+    },
+    "protocol_version": {
+      "minimum": 1,
+      "title": "Protocol Version",
+      "type": "integer"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "verification_requirements": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Verification Requirements",
+      "type": "array"
+    },
+    "worker_identity": {
+      "minLength": 1,
+      "title": "Worker Identity",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "run_id",
+    "task_id",
+    "omx_team_name",
+    "worker_identity",
+    "command_id",
+    "command_revision",
+    "expected_task_state",
+    "claim_generation",
+    "lease_generation",
+    "command_type",
+    "instruction",
+    "allowed_file_scope_hash",
+    "evidence_requirements",
+    "verification_requirements"
+  ],
+  "title": "CommandEnvelope",
+  "type": "object"
+}

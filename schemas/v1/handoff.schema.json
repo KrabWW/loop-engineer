@@ -1,0 +1,40 @@
+{
+  "properties": {
+    "constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "downstream_task_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Downstream Task Ids",
+      "type": "array"
+    },
+    "integration_branch": {
+      "minLength": 1,
+      "title": "Integration Branch",
+      "type": "string"
+    },
+    "integration_worktree": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Integration Worktree"
+    }
+  },
+  "required": [
+    "integration_branch"
+  ],
+  "title": "Handoff",
+  "type": "object"
+}

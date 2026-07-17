@@ -1,0 +1,26 @@
+{
+  "properties": {
+    "expires_at": {
+      "minLength": 1,
+      "title": "Expires At",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "last_heartbeat_at": {
+      "minLength": 1,
+      "title": "Last Heartbeat At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "generation",
+    "expires_at",
+    "last_heartbeat_at"
+  ],
+  "title": "Lease",
+  "type": "object"
+}

@@ -1,0 +1,87 @@
+{
+  "$defs": {
+    "Milestone": {
+      "description": "A release gate. Exit is binary: evidence condition met or not.",
+      "properties": {
+        "evidence_condition": {
+          "minLength": 1,
+          "title": "Evidence Condition",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "evidence_condition"
+      ],
+      "title": "Milestone",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "exclusions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Exclusions",
+      "type": "array"
+    },
+    "id": {
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "measurable_evidence": {
+      "minLength": 1,
+      "title": "Measurable Evidence",
+      "type": "string"
+    },
+    "milestones": {
+      "items": {
+        "$ref": "#/$defs/Milestone"
+      },
+      "minItems": 1,
+      "title": "Milestones",
+      "type": "array"
+    },
+    "scope": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Scope",
+      "type": "array"
+    },
+    "stop_conditions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Stop Conditions",
+      "type": "array"
+    },
+    "title": {
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "title",
+    "measurable_evidence",
+    "scope",
+    "milestones"
+  ],
+  "title": "Goal",
+  "type": "object"
+}

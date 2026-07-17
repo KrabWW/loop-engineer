@@ -1,0 +1,31 @@
+{
+  "properties": {
+    "generation": {
+      "minimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "holder": {
+      "minLength": 1,
+      "title": "Holder",
+      "type": "string"
+    },
+    "omx_task_id": {
+      "minLength": 1,
+      "title": "Omx Task Id",
+      "type": "string"
+    },
+    "token_digest": {
+      "title": "Token Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "omx_task_id",
+    "holder",
+    "generation",
+    "token_digest"
+  ],
+  "title": "Claim",
+  "type": "object"
+}
