@@ -1,8 +1,10 @@
 import pytest
 
+from loop_engineer.contracts.lease import Lease
 from loop_engineer.contracts.plan import DependencyEdge, Plan, TaskNode
+from loop_engineer.contracts.provider import Provider
 from loop_engineer.contracts.task import Task, VerificationSpec
-from loop_engineer.runtime.board import BoardStore
+from loop_engineer.runtime.board import BoardStore, PriorStateError
 
 
 def _plan(task_files: dict[str, list[str]], deps: dict[str, list[str]] | None = None) -> Plan:
@@ -38,3 +40,28 @@ def test_open_existing_board_roundtrips(tmp_path):
 def test_open_missing_board_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         BoardStore.open(tmp_path / "nope")
+
+
+_LEASE = Lease(
+    generation=0, expires_at="2099-01-01T00:00:00Z", last_heartbeat_at="2099-01-01T00:00:00Z",
+)
+
+
+def test_claim_returns_token_and_marks_claimed(tmp_path):
+    plan = _plan({"T1": ["src/a.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    token = store.claim("T1", Provider.OMX, _LEASE)
+    assert isinstance(token, str) and len(token) >= 16
+    e = store.load_state().tasks["T1"]
+    assert e.status.value == "claimed"
+    assert e.provider == Provider.OMX
+    assert e.claim is not None and e.claim.token_digest.startswith("sha256:")
+    assert e.lease == _LEASE
+
+
+def test_claim_wrong_prior_state_raises(tmp_path):
+    plan = _plan({"T1": ["src/a.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    store.claim("T1", Provider.OMX, _LEASE)
+    with pytest.raises(PriorStateError):
+        store.claim("T1", Provider.OMC, _LEASE)

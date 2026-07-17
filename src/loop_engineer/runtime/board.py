@@ -6,17 +6,23 @@ processes cannot corrupt each other.
 """
 
 import fcntl
+import hashlib
 import json
 import os
+import secrets
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
 from pydantic import BaseModel, Field
 
+from loop_engineer.contracts.claim import Claim
+from loop_engineer.contracts.lease import Lease
 from loop_engineer.contracts.plan import Plan
-from loop_engineer.contracts.task_run import TaskBoardEntry
+from loop_engineer.contracts.provider import Provider
+from loop_engineer.contracts.task_run import TaskBoardEntry, TaskRunStatus
 from loop_engineer.runtime import paths as paths_mod
+from loop_engineer.runtime.scope import ScopeError, overlaps
 
 
 class PriorStateError(Exception):
@@ -119,3 +125,57 @@ class BoardStore:
 
     def load_state(self) -> BoardState:
         return self._load()
+
+    def claim(
+        self,
+        task_id: str,
+        provider: Provider,
+        lease: Lease,
+        expected_prior: TaskRunStatus = TaskRunStatus.PENDING,
+    ) -> str:
+        """Atomically claim a task; return the raw claim token (kept by caller).
+
+        Raises PriorStateError if the task is not in expected_prior, and
+        ScopeOverlapError if the task's allowed files overlap a currently
+        CLAIMED task that is not a dependency ancestor.
+        """
+        with self._locked():
+            state = self._load()
+            entry = state.tasks.get(task_id)
+            if entry is None:
+                raise KeyError(f"unknown task {task_id!r}")
+            if entry.status != expected_prior:
+                raise PriorStateError(
+                    f"task {task_id} is {entry.status.value}, expected {expected_prior.value}"
+                )
+            self._check_scope(state, task_id)
+            raw_token = secrets.token_urlsafe(32)
+            digest = "sha256:" + hashlib.sha256(raw_token.encode()).hexdigest()
+            entry.claim = Claim(
+                omx_task_id=task_id,
+                holder=f"{provider.value}-attempt-{entry.attempt_id}",
+                generation=entry.attempt_id - 1,
+                token_digest=digest,
+            )
+            entry.lease = lease
+            entry.provider = provider
+            entry.status = TaskRunStatus.CLAIMED
+            self._save(state)
+            return raw_token
+
+    def _check_scope(self, state: "BoardState", task_id: str) -> None:
+        candidate = self._scope_map.get(task_id, [])
+        ancestors = self._ancestors.get(task_id, set())
+        for other_id, other in state.tasks.items():
+            if other_id == task_id or other.status != TaskRunStatus.CLAIMED:
+                continue
+            if other_id in ancestors:
+                continue  # dependency-ordered overlap is legal (spec §6.2)
+            other_files = self._scope_map.get(other_id, [])
+            try:
+                if overlaps(candidate, other_files):
+                    raise ScopeOverlapError(
+                        f"task {task_id} overlaps claimed task {other_id}"
+                    )
+            except ScopeError as e:
+                raise ScopeOverlapError(str(e)) from e
