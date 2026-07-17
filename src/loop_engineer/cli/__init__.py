@@ -10,9 +10,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="loop-engineer")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    from loop_engineer.cli import goal_cmd, plan_cmd, task_cmd  # local: keep startup cheap
+    from loop_engineer.cli import goal_cmd, plan_cmd, scheduler_cmd, task_cmd
     goal_cmd.register(sub)
     plan_cmd.register(sub)
+    scheduler_cmd.register(sub)
     task_cmd.register(sub)
 
     args = parser.parse_args(argv)
