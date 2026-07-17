@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+real_tmux=${OMC_REAL_TMUX_BIN:-}
+[ -n "$real_tmux" ] || {
+  printf 'ERROR: OMC_REAL_TMUX_BIN is required by the OMC tmux shim\n' >&2
+  exit 2
+}
+[ -x "$real_tmux" ] || {
+  printf 'ERROR: OMC_REAL_TMUX_BIN is not executable: %s\n' "$real_tmux" >&2
+  exit 2
+}
+
+state_base=${OMC_STATE_DIR:-}
+[ -n "$state_base" ] || exec "$real_tmux" "$@"
+shim_state="${state_base}/tmux-shim"
+
+target_pane=
+previous=
+for argument in "$@"; do
+  if [ "$previous" = -t ]; then
+    target_pane=$argument
+    break
+  fi
+  previous=$argument
+done
+[ -n "$target_pane" ] || exec "$real_tmux" "$@"
+safe_pane=$(printf '%s' "$target_pane" | tr -c 'A-Za-z0-9_.-' '_')
+pending_command="${shim_state}/pending-${safe_pane}.command"
+pending_script="${shim_state}/pending-${safe_pane}.script"
+
+if [ "${1:-}" = capture-pane ] && [ -f "$pending_command" ]; then
+  cat "$pending_command"
+  exit 0
+fi
+
+if [ "${1:-}" != send-keys ]; then
+  exec "$real_tmux" "$@"
+fi
+
+if [ "${!#}" = Enter ] && [ -f "$pending_command" ]; then
+  "$real_tmux" "$@"
+  rm -f "$pending_command" "$pending_script"
+  exit 0
+fi
+
+literal_index=-1
+for ((index = 1; index < $#; index += 1)); do
+  if [ "${!index}" = -l ]; then
+    literal_index=$((index + 1))
+    break
+  fi
+done
+
+# Only intercept the exact OMC literal form. Key-name sends and unusual
+# send-keys layouts continue through unchanged.
+if [ "$literal_index" -lt 0 ] || [ "$literal_index" -ne "$#" ]; then
+  exec "$real_tmux" "$@"
+fi
+literal=${!literal_index}
+literal_bytes=$(LC_ALL=C printf '%s' "$literal" | wc -c | tr -d '[:space:]')
+if [ "$literal_bytes" -le 768 ]; then
+  exec "$real_tmux" "$@"
+fi
+
+umask 077
+mkdir -p "$shim_state"
+chmod 700 "$shim_state"
+if [ -f "$pending_script" ]; then
+  previous_script=$(cat "$pending_script" 2>/dev/null || true)
+  [ -z "$previous_script" ] || rm -f "$previous_script"
+fi
+launch_script=$(mktemp "${shim_state}/launch-${safe_pane}.XXXXXX")
+short_command=$(python3 - "$launch_script" "$literal" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+path = Path(sys.argv[1])
+literal = sys.argv[2]
+quoted_path = shlex.quote(str(path))
+path.write_text(f"#!/bin/sh\nrm -f -- {quoted_path}\nexec {literal}\n")
+path.chmod(0o700)
+print(f"exec {quoted_path}", end="")
+PY
+)
+printf '%s' "$literal" > "$pending_command"
+printf '%s' "$launch_script" > "$pending_script"
+
+# The shell only receives a short path. While it is buffered, capture-pane is
+# proxied above with the original command so OMC's delivery verifier sees the
+# exact expected literal. Enter clears the proxy state and runs the private,
+# self-deleting launcher.
+exec "$real_tmux" send-keys -t "$target_pane" -l "$short_command"

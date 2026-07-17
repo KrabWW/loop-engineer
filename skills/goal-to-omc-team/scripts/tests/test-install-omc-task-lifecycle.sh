@@ -37,6 +37,7 @@ make_repo() {
 
 sources=(
   scripts/start-omc-task
+  scripts/omc-runtime-bin/tmux
   scripts/status-omc-task
   scripts/finish-omc-task
   scripts/run-omc-task-batch

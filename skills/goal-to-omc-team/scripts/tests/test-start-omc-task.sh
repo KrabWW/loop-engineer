@@ -4,6 +4,7 @@ set -euo pipefail
 
 test_dir=$(cd "$(dirname "$0")" && pwd -P)
 source_launcher=$(cd "$test_dir/.." && pwd -P)/start-omc-task
+source_tmux_shim=$(cd "$test_dir/.." && pwd -P)/omc-runtime-bin/tmux
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/start-omc-task.XXXXXX")
 trap 'rm -rf "$tmp_root"' EXIT
 
@@ -94,7 +95,7 @@ OMC_FAKE
 #!/usr/bin/env bash
 set -euo pipefail
 state=${FAKE_TMUX_STATE:?}
-mkdir -p "$state/sessions" "$state/panes" "$state/commands" "$state/dimensions"
+    mkdir -p "$state/sessions" "$state/panes" "$state/commands" "$state/dimensions" "$state/window-size"
 case "${1:-}" in
   -V) printf 'tmux fake\n' ;;
   has-session)
@@ -140,6 +141,24 @@ case "${1:-}" in
     [ -f "$state/panes/$pane" ] || exit 1
     printf '0\n'
     ;;
+  set-window-option)
+    shift; [ "${1:-}" = -t ] && shift; target=${1:?}; shift
+    [ "${1:-}" = window-size ] || exit 6
+    [ "${2:-}" = manual ] || exit 7
+    printf 'manual\n' > "$state/window-size/${target%%:*}"
+    ;;
+  resize-window)
+    shift; [ "${1:-}" = -t ] && shift; target=${1:?}; shift
+    columns=; rows=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -x) columns=$2; shift 2 ;;
+        -y) rows=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%sx%s\n' "$columns" "$rows" > "$state/dimensions/${target%%:*}"
+    ;;
   kill-session)
     shift; [ "${1:-}" = -t ] && shift; session=${1:?}; rm -f "$state/sessions/$session"
     for pane_file in "$state/panes"/*; do [ -f "$pane_file" ] || continue; read -r pane_session < "$pane_file"; [ "$pane_session" != "$session" ] || rm -f "$pane_file"; done
@@ -158,9 +177,11 @@ make_fixture() {
   task_status=${2:-ready}
   dependency_status=${3:-done}
   repo="$tmp_root/$fixture_name"
-  mkdir -p "$repo/docs/tasks/contracts" "$repo/scripts"
+  mkdir -p "$repo/docs/tasks/contracts" "$repo/scripts/omc-runtime-bin"
   cp "$source_launcher" "$repo/scripts/start-omc-task"
+  cp "$source_tmux_shim" "$repo/scripts/omc-runtime-bin/tmux"
   chmod +x "$repo/scripts/start-omc-task"
+  chmod +x "$repo/scripts/omc-runtime-bin/tmux"
   {
     printf '# DEP-001 prerequisite\n\n'
     printf -- '- Status: `%s`\n' "$dependency_status"
@@ -254,8 +275,11 @@ assert_contains "$leader_command" 'OMC_RUNTIME_V2=1'
 assert_contains "$leader_command" 'OMC_STATE_DIR='
 assert_contains "$leader_command" 'OMC_TEAM_WORKTREE_MODE=branch'
 assert_contains "$leader_command" 'OMC_TEAM_NO_RC=1'
+assert_contains "$leader_command" 'OMC_REAL_TMUX_BIN='
+assert_contains "$leader_command" 'omc-runtime-bin'
 assert_contains "$leader_command" '--madmax'
-[ "$(<"${repo}-fake-tmux/dimensions/omc-qs-proto-sample-001")" = '240x60' ] || fail 'OMC leader tmux session did not reserve a wide startup surface'
+[ "$(<"${repo}-fake-tmux/dimensions/omc-qs-proto-sample-001")" = '480x60' ] || fail 'OMC leader tmux session did not reserve a split-safe startup surface'
+[ "$(<"${repo}-fake-tmux/window-size/omc-qs-proto-sample-001")" = manual ] || fail 'OMC leader tmux window size was not locked against client resize'
 if printf '%s\n' "$leader_command" | rg -F -- 'omx ' >/dev/null; then
   fail 'OMC leader launch unexpectedly used omx'
 fi
@@ -268,6 +292,48 @@ launch_state="$success_base/launch.json"
 test -f "$launch_state" || fail 'success did not record launch state'
 rg -n '"derived_ready": false|"refer_fingerprint": "[0-9a-f]{64}"|"refer_fingerprint_version": "content-v2"' "$launch_state" >/dev/null || fail 'launch state omitted derived-ready, refer baseline, or version'
 test -z "$(git -C "$tmp_root/success-task-worktrees/omc-proto-sample-001" status --porcelain)" || fail 'success worktree is dirty'
+
+chunk_target="$tmp_root/chunk-target-tmux"
+chunk_log="$tmp_root/chunk-target.log"
+cat > "$chunk_target" <<'CHUNK_TARGET'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  capture-pane) printf 'REAL_CAPTURE\n' ;;
+  send-keys)
+    shift
+    for arg in "$@"; do printf '%s\n' "$arg" >> "${FAKE_CHUNK_LOG:?}"; done
+    ;;
+  *) exit 0 ;;
+esac
+CHUNK_TARGET
+chmod +x "$chunk_target"
+long_literal=$(python3 -c 'print("printf ready #" + "X" * 5000, end="")')
+shim_state="$tmp_root/chunk-shim-state"
+FAKE_CHUNK_LOG="$chunk_log" OMC_STATE_DIR="$shim_state" OMC_REAL_TMUX_BIN="$chunk_target" \
+  "$repo/scripts/omc-runtime-bin/tmux" send-keys -t %99 -l "$long_literal"
+short_literal=$(tail -1 "$chunk_log")
+[ "${#short_literal}" -lt 768 ] || fail 'tmux shim did not replace the long literal with a short launcher path'
+assert_contains "$short_literal" 'exec '
+staged_script=$(find "$shim_state/tmux-shim" -type f -name 'launch-_99.*' | awk 'NF { print; exit }')
+[ -n "$staged_script" ] || fail 'tmux shim did not stage a private worker launcher'
+python3 - "$staged_script" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+mode = stat.S_IMODE(Path(sys.argv[1]).stat().st_mode)
+if mode != 0o700:
+    raise SystemExit(f"tmux shim worker launcher mode is {mode:o}, expected 700")
+PY
+captured=$(FAKE_CHUNK_LOG="$chunk_log" OMC_STATE_DIR="$shim_state" OMC_REAL_TMUX_BIN="$chunk_target" \
+  "$repo/scripts/omc-runtime-bin/tmux" capture-pane -J -t %99 -p -S -80)
+[ "$captured" = "$long_literal" ] || fail 'tmux shim did not expose the original literal to OMC delivery verification'
+FAKE_CHUNK_LOG="$chunk_log" OMC_STATE_DIR="$shim_state" OMC_REAL_TMUX_BIN="$chunk_target" \
+  "$repo/scripts/omc-runtime-bin/tmux" send-keys -t %99 Enter
+captured=$(FAKE_CHUNK_LOG="$chunk_log" OMC_STATE_DIR="$shim_state" OMC_REAL_TMUX_BIN="$chunk_target" \
+  "$repo/scripts/omc-runtime-bin/tmux" capture-pane -J -t %99 -p -S -80)
+[ "$captured" = REAL_CAPTURE ] || fail 'tmux shim retained stale delivery-verification state after Enter'
 summary_missing=$(cd "$repo" && OMC_STATE_DIR="$repo/.git/omc-task-state/wrong-slug" "$tmp_root/fake-bin/omc" team api get-summary --input '{"team_name":"fake-team"}' --json)
 assert_contains "$summary_missing" '"ok":false'
 (cd "$success_worktree" && OMC_RUNTIME_V2=1 OMC_STATE_DIR="$success_base" OMC_TEAM_WORKTREE_MODE=branch "$tmp_root/fake-bin/omc" team shutdown fake-team >/dev/null)

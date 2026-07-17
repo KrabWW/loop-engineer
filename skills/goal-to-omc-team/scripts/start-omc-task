@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+tmux_shim="${script_dir}/omc-runtime-bin/tmux"
+
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
@@ -128,6 +131,8 @@ df_bin=${DF_BIN:-df}
 command -v "$omc_bin" >/dev/null 2>&1 || fail "required OMC command not found: ${omc_bin}"
 command -v "$tmux_bin" >/dev/null 2>&1 || fail "required tmux command not found: ${tmux_bin}"
 command -v "$df_bin" >/dev/null 2>&1 || fail "required df command not found: ${df_bin}"
+tmux_real_bin=$(command -v "$tmux_bin")
+[ -x "$tmux_shim" ] || fail "required OMC tmux shim not found or not executable: ${tmux_shim}"
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'not inside a Git repository'
 repo_root=$(cd "$repo_root" && pwd -P)
@@ -185,11 +190,11 @@ minimum_free_kib=${OMC_MIN_FREE_KIB:-20971520}
 start_timeout=${OMC_START_TIMEOUT_SECONDS:-180}
 [[ "$start_timeout" =~ ^[1-9][0-9]*$ ]] || fail 'OMC_START_TIMEOUT_SECONDS must be a positive integer'
 [ "$start_timeout" -le 1800 ] || fail 'OMC_START_TIMEOUT_SECONDS must not exceed 1800'
-tmux_columns=${OMC_TMUX_COLUMNS:-240}
+tmux_columns=${OMC_TMUX_COLUMNS:-480}
 tmux_rows=${OMC_TMUX_ROWS:-60}
 [[ "$tmux_columns" =~ ^[1-9][0-9]*$ ]] || fail 'OMC_TMUX_COLUMNS must be a positive integer'
 [[ "$tmux_rows" =~ ^[1-9][0-9]*$ ]] || fail 'OMC_TMUX_ROWS must be a positive integer'
-[ "$tmux_columns" -ge 160 ] || fail 'OMC_TMUX_COLUMNS must be at least 160 for worker delivery verification'
+[ "$tmux_columns" -ge 320 ] || fail 'OMC_TMUX_COLUMNS must be at least 320 so a split worker pane remains wide enough for delivery verification'
 [ "$tmux_rows" -ge 40 ] || fail 'OMC_TMUX_ROWS must be at least 40 for worker delivery verification'
 
 git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
@@ -331,7 +336,9 @@ path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 
 printf -v leader_command '%q ' \
-  exec env "OMC_RUNTIME_V2=1" "OMC_STATE_DIR=${state_base}" "OMC_TEAM_WORKTREE_MODE=branch" "OMC_TEAM_NO_RC=1" "$omc_bin" launch --madmax --notify false "$prompt"
+  exec env "PATH=$(dirname "$tmux_shim"):${PATH}" "OMC_REAL_TMUX_BIN=${tmux_real_bin}" \
+  "OMC_RUNTIME_V2=1" "OMC_STATE_DIR=${state_base}" "OMC_TEAM_WORKTREE_MODE=branch" "OMC_TEAM_NO_RC=1" \
+  "$omc_bin" launch --madmax --notify false "$prompt"
 leader_command=${leader_command% }
 if ! leader_pane=$("$tmux_bin" new-session -d -P -F '#{pane_id}' \
   -x "$tmux_columns" -y "$tmux_rows" -s "$session" -c "$worktree" "$leader_command"); then
@@ -343,6 +350,8 @@ if ! leader_pane=$("$tmux_bin" new-session -d -P -F '#{pane_id}' \
 fi
 tmux_started=1
 [[ "$leader_pane" =~ ^%[0-9]+$ ]] || fail "tmux did not return a valid leader pane id: ${leader_pane:-missing}"
+"$tmux_bin" set-window-option -t "${session}:0" window-size manual >/dev/null
+"$tmux_bin" resize-window -t "${session}:0" -x "$tmux_columns" -y "$tmux_rows" >/dev/null
 python3 - "$launch_state_file" "$leader_pane" <<'PY'
 import json
 from pathlib import Path

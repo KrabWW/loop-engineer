@@ -6,6 +6,7 @@ test_dir=$(cd "$(dirname "$0")" && pwd -P)
 bundle=$(cd "$test_dir/.." && pwd -P)
 source_launcher="$bundle/start-omc-task"
 source_status="$bundle/status-omc-task"
+source_tmux_shim="$bundle/omc-runtime-bin/tmux"
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/status-omc-task.XXXXXX")
 trap 'rm -rf "$tmp_root"' EXIT
 
@@ -102,6 +103,7 @@ case "${1:-}" in
   display-message) shift; [ "${1:-}" = -p ] && shift; [ "${1:-}" = -t ] && shift; pane=${1:?}; [ -f "$state/panes/$pane" ] || exit 1; printf '0\n' ;;
   capture-pane) printf 'claude ready\n' ;;
   send-keys) exit 0 ;;
+  set-window-option|resize-window) exit 0 ;;
   kill-session) shift; [ "${1:-}" = -t ] && shift; session=${1:?}; rm -f "$state/sessions/$session"; for pf in "$state/panes"/*; do [ -f "$pf" ] || continue; read -r ps < "$pf"; [ "$ps" != "$session" ] || rm -f "$pf"; done ;;
   attach) exit 0 ;;
   *) exit 2 ;;
@@ -113,10 +115,11 @@ TMUX_FAKE
 make_fixture() {
   fixture_name=$1
   repo="$tmp_root/$fixture_name"
-  mkdir -p "$repo/docs/tasks/contracts" "$repo/scripts"
+  mkdir -p "$repo/docs/tasks/contracts" "$repo/scripts/omc-runtime-bin"
   cp "$source_launcher" "$repo/scripts/start-omc-task"
   cp "$source_status" "$repo/scripts/status-omc-task"
-  chmod +x "$repo/scripts/start-omc-task" "$repo/scripts/status-omc-task"
+  cp "$source_tmux_shim" "$repo/scripts/omc-runtime-bin/tmux"
+  chmod +x "$repo/scripts/start-omc-task" "$repo/scripts/status-omc-task" "$repo/scripts/omc-runtime-bin/tmux"
   printf '# DEP-001\n\n- Status: `done`\n- Depends on: none\n\n## Goal\n\nx.\n' > "$repo/docs/tasks/contracts/DEP-001.md"
   printf '# PROTO-SAMPLE-001\n\n- Status: `ready`\n- Depends on: `DEP-001`\n\n## Goal\n\nx.\n\n## Allowed Files\n\n- `docs/tasks/contracts/PROTO-SAMPLE-001.md`\n' > "$repo/docs/tasks/contracts/PROTO-SAMPLE-001.md"
   git -C "$repo" init -b main -q

@@ -35,6 +35,7 @@ repo=$(cd "$repo" && pwd -P)
 
 sources=(
   scripts/start-omc-task
+  scripts/omc-runtime-bin/tmux
   scripts/status-omc-task
   scripts/finish-omc-task
   scripts/run-omc-task-batch
@@ -46,6 +47,7 @@ sources=(
 )
 targets=(
   scripts/start-omc-task
+  scripts/omc-runtime-bin/tmux
   scripts/status-omc-task
   scripts/finish-omc-task
   scripts/run-omc-task-batch
@@ -58,6 +60,7 @@ targets=(
 
 bash -n \
   "$skill_root/scripts/start-omc-task" \
+  "$skill_root/scripts/omc-runtime-bin/tmux" \
   "$skill_root/scripts/status-omc-task" \
   "$skill_root/scripts/finish-omc-task" \
   "$skill_root/scripts/run-omc-task-batch" \
@@ -91,6 +94,7 @@ done
 
 bash -n \
   "$repo/scripts/start-omc-task" \
+  "$repo/scripts/omc-runtime-bin/tmux" \
   "$repo/scripts/status-omc-task" \
   "$repo/scripts/finish-omc-task" \
   "$repo/scripts/run-omc-task-batch" \

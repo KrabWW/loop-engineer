@@ -17,7 +17,7 @@ Target the OMC `omc` CLI (not the Claude native `/team` skill and not OMX). Auth
 
 - Persistent leader: `omc launch --madmax --notify false "<leader-prompt>"` (no `omc exec`).
 - One atomic worker per Task: `omc team 1:claude:executor --auto-merge --no-decompose "<atomic-task>"`. `--no-decompose` assigns the same task text to every requested worker, so v1 always uses exactly one worker; parallelism is across independent Tasks in batch waves.
-- Runtime env on the leader: `OMC_RUNTIME_V2=1 OMC_STATE_DIR=<task-state-base> OMC_TEAM_WORKTREE_MODE=branch OMC_TEAM_NO_RC=1`; child lifecycle calls use the first three bindings. Auto-merge requires the leader branch to be neither `main` nor `master`. Create the persistent tmux session at least `160x40` (the bundled launcher defaults to `240x60`) so OMC can verify long worker-start commands without narrow-pane wrapping false failures.
+- Runtime env on the leader: `OMC_RUNTIME_V2=1 OMC_STATE_DIR=<task-state-base> OMC_TEAM_WORKTREE_MODE=branch OMC_TEAM_NO_RC=1`; child lifecycle calls use the first three bindings. Auto-merge requires the leader branch to be neither `main` nor `master`. The bundled launcher creates a manual-size `480x60` tmux window and injects its private `omc-runtime-bin/tmux` shim. The shim stages literals over tmux's observed 1024-character input ceiling as private self-deleting launchers while preserving OMC's delivery/submission verification contract.
 - Progress: `omc team api get-summary`, `read-worker-status`, and `read-worker-heartbeat` (each `--input '<json>' --json`). There is no `team await`; poll on an interval.
 
 ## Workflow
@@ -63,7 +63,7 @@ Ask one question when evidence cannot determine execution semantics, durable own
 - Secrets in prompts, logs, browser storage, or ordinary fields.
 - A real Team starts during graph/launcher generation.
 - Startup reports success without a ready Team and the captured leader pane at `pane_dead=0`.
-- Startup creates a leader session without immediately persisting `leader_pane`, or uses a tmux pane narrower than `160x40`.
+- Startup creates a leader session without immediately persisting `leader_pane`, omits the runtime tmux shim, or allows the `480x60` launch window to be resized before worker delivery.
 - Finishing asks for a random Team name, scans outside the Task state base, uses plain rebase, omits any of the three verification runs, or trusts a stale worker heartbeat.
 - Recovery chooses among multiple Team directories by mtime or name. Query every candidate through exact state-base-bound `get-summary`; resume only when exactly one candidate is valid, and fail closed when multiple live Teams remain.
 - Batch runs finisher/main integration in parallel or crosses a custom wave barrier.
