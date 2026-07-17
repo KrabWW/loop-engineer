@@ -1,7 +1,7 @@
 # Loop Engineer Design
 
 Date: 2026-07-17
-Status: Draft for review
+Status: Approved
 
 ## 1. Purpose
 
@@ -94,6 +94,18 @@ loop-engineer doctor
 loop-engineer install-skills --codex|--claude|--all
 ```
 
+Rerunning the original `loop-engineer run <lane> --plan <plan-file>` command is the canonical resume operation. `loop-engineer resume` is only a convenience alias that resolves one existing run journal and re-invokes the recorded lane and plan; zero or multiple matching journals fail closed.
+
+All commands use these stable exit classes:
+
+- `0`: requested state reached or an already-reached idempotent state confirmed.
+- `2`: invalid input, schema, plan, dependency, or unsupported provider version.
+- `3`: ownership, lease, leader, Team, worktree, or recovery ambiguity.
+- `4`: runtime or worker terminal failure.
+- `5`: verification, scope, provenance, or protected-path failure.
+- `6`: Git integration conflict or `main` drift.
+- `7`: partial completion preserved for same-command recovery.
+
 ## 5. Architecture
 
 ```text
@@ -150,6 +162,7 @@ Owns:
 
 - Plan parsing and wave barriers.
 - Task state machine.
+- Normalized-path write-scope conflict detection.
 - Deterministic names for branch, worktree, tmux session, and journals.
 - Process leases and heartbeats.
 - Durable event append and replay.
@@ -158,15 +171,17 @@ Owns:
 
 The runtime core does not import OMX- or OMC-specific state directly. Runtime adapters translate provider state into common events.
 
+Before scheduling a wave, the compiler normalizes every exact `Allowed Files` entry against the repository root, resolves file-versus-directory containment, and compares every Task pair. Overlap is legal only when the Tasks are ordered by a dependency path. Unordered overlap is rejected with exit `2`; the scheduler never silently serializes an invalid plan because that would hide a missing ownership decision.
+
 ### 6.3 Pure OMX runtime adapter
 
 Starts a detached Task integration worktree and persistent Codex leader. The leader launches exactly one OMX Team for the atomic Task, assigns non-overlapping work, integrates worker results, reviews the integrated HEAD, and produces evidence.
 
-The finisher requires a healthy terminal Team, a live or legally recovered leader, committed evidence, clean scope, Task status `done`, an unchanged protected reference fingerprint, and three verification runs: before shutdown, after rebase, and after fast-forward integration.
+The finisher requires a healthy terminal Team, a live or legally recovered leader, committed evidence, clean scope, OMX Task status `completed`, an unchanged protected reference fingerprint, and three verification runs: before shutdown, after rebase, and after fast-forward integration.
 
 ### 6.4 OMC executor adapter
 
-The OMC executor adapter participates as a real OMX worker while owning a persistent Claude leader and OMC Team.
+The OMC executor adapter participates as a real OMX worker while owning a persistent Claude leader and OMC Team. Version 1 uses a standard OMX Codex worker pane with the `omc-adapter` role. That worker immediately starts the deterministic `loop-engineer adapter serve` sidecar in the foreground and performs no product coding. The sidecar uses the worker identity and claim token; the Codex worker remains the supervised OMX pane. Native custom worker executables are deferred until OMX supports them without patching.
 
 It must:
 
@@ -183,9 +198,15 @@ It must:
 
 The adapter is not the final approver. An OMC `complete` result becomes `READY_FOR_REVIEW`, not repository completion. The OMX leader may approve, request another correction round, perform direct OMX fixes, or fail the Task.
 
+The adapter retains its OMX claim across OMC execution, blocking, review, correction, provider quiescence, promotion, and OMX repair. Writer transfer changes filesystem authority but does not release the Task claim. The adapter renews its generation-scoped lease while the claim is held, performs no product writes after quiescence begins, and releases the claim only when the OMX leader approves and transitions the OMX Task to `completed`, or when claim-safe cancellation/failure ends the worker Task. Review does not complete the OMX Task.
+
 ### 6.5 Finisher
 
 The OMX-side finisher is the only component allowed to integrate into `main`. It validates ownership and evidence, shuts down active runtimes, rebases with merge topology preserved, reruns authoritative verification, fast-forwards `main`, verifies merged `main`, and removes exact lifecycle resources.
+
+In Hybrid mode, the finisher accepts only the Task integration branch HEAD recorded by the OMX leader after provider quiescence and deterministic promotion. It never integrates an OMC provider branch directly. OMC completion pins `omc_result_commit`; after the provider process group is gone, the runtime core promotes that exact tree into the Task integration branch and records `review_base_commit`. The adapter no longer writes after quiescence begins. Any tree mismatch fails with exit `5`.
+
+If failure occurs before fast-forwarding `main`, main remains unchanged and all exact recovery resources are retained. A rebase conflict or main drift returns exit `6`. If merged-main verification fails after `main` advanced, the finisher never resets or rewrites `main`; it writes `post_merge_verification_failed`, retains the evidence journal, branch, and worktree, blocks later waves, and returns exit `7`. Recovery requires a new repair Task based on the current `main`, followed by normal forward-only integration.
 
 ## 7. Hybrid Protocol
 
@@ -195,7 +216,7 @@ Each leader-to-adapter command includes:
 
 - Protocol version.
 - Run ID, Task ID, OMX Team name, and worker identity.
-- Message ID and causation ID.
+- Unique `command_id`, optional parent `causation_id`, and monotonic `command_revision` within the Task run.
 - Expected Task state and current claim/lease generation.
 - Command type.
 - Atomic instruction.
@@ -209,12 +230,15 @@ Command types in version 1:
 - `CONTINUE_TASK`
 - `REQUEST_FIX`
 - `REQUEST_EVIDENCE`
+- `RELEASE_FOR_OMX_FIX`
 - `CANCEL_TASK`
 - `SHUTDOWN_EXECUTOR`
 
+`CANCEL_TASK` is valid only while the adapter holds the OMX Task claim. The public `stop` command routes pre-claim cancellation to the runtime-core `CANCEL_PENDING` operation and post-approval/pre-fast-forward cancellation to runtime-core `CANCEL_INTEGRATION`; these are journal operations, not leader-to-adapter commands.
+
 ### 7.2 Event envelope
 
-Adapter-to-leader events include the same correlation identity and one of:
+Adapter-to-leader events include `run_id`, `task_id`, `command_id`, a unique `event_id`, monotonic `event_sequence`, provider observation revision, lease generation, and one of:
 
 - `ACKNOWLEDGED`
 - `STARTED`
@@ -226,29 +250,83 @@ Adapter-to-leader events include the same correlation identity and one of:
 - `CANCELLED`
 - `SHUTDOWN_ACK`
 
-Events are append-only and idempotent by message ID. A summarized mailbox notification points at durable evidence rather than embedding large logs.
+Events are append-only and idempotent by `event_id`. Multiple progress and heartbeat events for one command remain distinct. The journal accepts only the next `event_sequence`; duplicate event IDs are ignored, future sequence gaps are held for replay, and a lower unseen sequence is rejected as stale. Provider observation revisions prevent an older OMC snapshot from overwriting a newer one. A summarized mailbox notification points at durable evidence rather than embedding large logs.
 
-### 7.3 State machine
+### 7.3 Authoritative transition and ownership table
 
-```text
-ready
-  -> claimed
-  -> omc_starting
-  -> omc_executing
-  -> ready_for_omx_review
-  -> omx_reviewing
-  -> correction_requested -> omc_executing
-  -> omx_fixing
-  -> omx_verified
-  -> finishing
-  -> merged
-```
+This table is the sole normative lifecycle map. Provider adapters may expose more detailed observations, but they cannot introduce additional common-state transitions.
 
-Terminal alternatives are `failed` and `cancelled`. `blocked` is a reviewable hold, not implicit failure.
+| Common state | OMX Task | Claim holder | Filesystem writer | OMC observation | Accepted command or trigger | Legal next state | Exit/terminality |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ready` | `pending` | none | none | absent | `START_TASK` / runtime `CANCEL_PENDING` | `claimed` / `cancelled` | cancel terminal |
+| `claimed` | `in_progress` | adapter generation N | none | absent | claim success / `CANCEL_TASK` | `omc_starting` / `cancelled` | cancel releases claim and is terminal |
+| `omc_starting` | `in_progress` | adapter N | provider process group N | starting | readiness success / startup hold / `CANCEL_TASK` | `omc_executing` / `blocked` / `cancelled` | hold `7`; cancel terminal |
+| `omc_executing` | `in_progress` | adapter N | provider process group N | active | provider complete / provider hold / provider failure / `CANCEL_TASK` | `ready_for_omx_review` / `blocked` / `failed` / `cancelled` | failure `4`; terminal only for failed/cancelled |
+| `blocked` | `in_progress` | adapter N, lease renewed | provider process group N or none as journaled | blocked evidence | `CONTINUE_TASK` / `REQUEST_FIX` / `CANCEL_TASK` / leader fail decision | `omc_executing` / `correction_requested` / `cancelled` / `failed` | hold `7`; terminal only for failed/cancelled |
+| `ready_for_omx_review` | `in_progress` | adapter N | provider process group N; OMX read-only | complete, pinned result | leader begins review / `CANCEL_TASK` | `omx_reviewing` / `cancelled` | cancel terminal after provider shutdown |
+| `omx_reviewing` | `in_progress` | adapter N | provider process group N; OMX read-only | complete and idle | `REQUEST_FIX` / `REQUEST_EVIDENCE` / `RELEASE_FOR_OMX_FIX` / `CANCEL_TASK` | `correction_requested` / `omx_reviewing` / `writer_quiescing` / `cancelled` | non-terminal; cancel terminal after provider shutdown |
+| `correction_requested` | `in_progress` | adapter N | provider process group N | resumable same Team | accepted follow-up / failure / `CANCEL_TASK` | `omc_executing` / `failed` / `cancelled` | terminal only for failed/cancelled |
+| `writer_quiescing` | `in_progress` | adapter N | provider process group N until fence proof, then none | shutdown requested | full fence proof / timeout or ambiguity / `CANCEL_TASK` | `promoting` / `blocked` / `cancelled` | hold `7`; cancel terminal after cleanup proof |
+| `promoting` | `in_progress` | adapter N | runtime core only | process group absent, frozen commit | tree promotion success / mismatch / `CANCEL_TASK` | `post_promotion_review` / `failed` / `cancelled` | mismatch `5`; cancel terminal with branch retained |
+| `post_promotion_review` | `in_progress` | adapter N, no write authority | OMX generation N+1 | provider absent | review finds fixes / review and verification pass / review failure / `CANCEL_TASK` | `omx_fixing` / `omx_verified` / `failed` / `cancelled` | verification required before verified; terminal only for failed/cancelled |
+| `omx_fixing` | `in_progress` | adapter N, no write authority | OMX generation N+1 | provider absent | fix verified / fix failure / `CANCEL_TASK` | `omx_verified` / `failed` / `cancelled` | terminal only for failed/cancelled |
+| `omx_verified` | `completed` after leader approval and claim release | none | none | provider absent | finisher lock acquired / runtime `CANCEL_INTEGRATION` | `finishing` / `integration_cancelled` | integration cancellation terminal before finisher starts |
+| `finishing` | `completed` | none | finisher only | provider absent | pre-merge failure / main fast-forward / runtime `CANCEL_INTEGRATION` before fast-forward | `finishing` / `merged` / `integration_cancelled` | integration failure `6` or resumable `7`; cancellation terminal only before fast-forward |
+| `merged` | `completed` | none | none | absent | merged-main verification pass / fail / runtime stop | `merged` / `post_merge_verification_failed` / reject | success terminal; stop rejected `2` |
+| `post_merge_verification_failed` | `completed` | none | none; later waves blocked | absent | create forward repair Task / runtime stop | `post_merge_verification_failed` / reject | non-terminal incident; stop rejected `2` |
+| `failed` | `failed` | none | none | retained evidence | retry reset transaction / runtime stop | `ready` / `failed` | retry creates new attempt in `pending`; stop idempotent `0` |
+| `cancelled` | `cancelled` | none | none | absent or quarantined evidence | retry reset transaction / runtime stop | `ready` / `cancelled` | retry creates new attempt in `pending`; stop idempotent `0` |
+| `integration_cancelled` | `completed` | none | none | provider absent | retry integration or create repair Task | `finishing` or new Task | terminal for the current integration attempt; main unchanged |
 
-### 7.4 Recovery rules
+The adapter may transition `pending -> in_progress` only through claim-safe OMX API. It may transition to `failed` or `cancelled` with the live claim token. Only the OMX leader may approve `in_progress -> completed`, and only after provider quiescence, promoted-tree review, and verification evidence. Retry is an atomic runtime-core transaction: require terminal attempt state and no live claim or writer, increment `attempt_id` and lease generation, preserve prior evidence, reset the OMX Task to `pending`, then enter `ready`; the next `START_TASK` performs a new claim.
 
-- Replaying a command with the same message ID must not start a second OMC Team.
+Cancellation is accepted only before `main` fast-forward. `CANCEL_PENDING` handles `ready`; `CANCEL_TASK` handles claim-owned states from `claimed` through `omx_fixing`; `CANCEL_INTEGRATION` handles `omx_verified` and pre-fast-forward `finishing` without changing the already-completed OMX worker Task. During `writer_quiescing`, `promoting`, or pre-fast-forward `finishing`, cancellation first completes the current atomic safety step, preserves the integration branch and journal, prevents main integration, and then records `cancelled` or `integration_cancelled` as appropriate. After `main` fast-forward, all cancellation operations return exit `2`; merged-main verification must finish and any defect is handled by a forward repair Task.
+
+### 7.4 Executor lifecycle
+
+`SHUTDOWN_EXECUTOR` controls the adapter executor, not a Task state:
+
+| Executor state | Active Task condition | `SHUTDOWN_EXECUTOR` result |
+| --- | --- | --- |
+| `adapter_idle` | no adapter-held claim and no provider process, regardless of later OMX integration or incident state | transition to `adapter_stopping`, remove exact sidecar/session resources, emit one `SHUTDOWN_ACK`, then `adapter_shutdown` |
+| `adapter_active` | adapter holds a Task claim or an adapter-owned provider process exists | reject with exit `2`; caller must use `CANCEL_TASK` or finish the worker Task first |
+| `adapter_stopping` | no active Task | duplicate command is idempotent; resume the journaled cleanup step and emit no duplicate ACK event ID |
+| `adapter_shutdown` | no active Task | return exit `0` with the existing `SHUTDOWN_ACK` evidence |
+
+Executor shutdown never releases an active claim implicitly and never substitutes for Task cancellation.
+
+### 7.5 Recovery coordinate record
+
+Each Task stores a versioned recovery record in the Git common directory, outside ordinary commits. It includes:
+
+- Repository identity, run ID, Task ID, lane, and protocol version.
+- Base commit, integration branch/worktree, adapter execution branch/worktree, and pinned result/review commits.
+- OMX Team name, leader session/pane, worker identity, task ID, claim token digest, lease generation, and lease expiry.
+- Claude leader session/pane/PID start time and executable identity.
+- OMC state root, Team name, worker identities, provider task IDs, and last summary revision.
+- Last command revision, event sequence, journal checksum, current phase, and cleanup phase.
+- Writer fencing generation and shutdown acknowledgments.
+
+Raw claim tokens and credentials are stored in permission-restricted runtime state, never in logs or committed evidence.
+
+### 7.6 Recovery matrix
+
+| Failure point | Required ownership proof | Permitted recovery | Otherwise |
+| --- | --- | --- | --- |
+| Before OMC config exists | exact adapter lease plus exact Claude pane/PID start identity | resume startup or remove only wholly absent runtime | exit `3`, preserve coordinates |
+| OMC config exists, startup incomplete | one exact state root, Team config, leader pane, and matching worktree | reconnect and continue readiness probe | exit `3` |
+| Claude leader lost, OMC Team active | one exact Task-bound Team and no competing leader | recreate one exact-worktree Claude recovery leader without starting a Team | exit `3` |
+| OMC worker lost | exact Team plus provider summary proving one failed worker | record `blocked`, preserve claim and evidence, and wait for OMX retry/fail instruction; no duplicate Team | exit `7` |
+| Adapter sidecar lost | live OMX worker pane, matching lease generation, replayable journal | restart sidecar and replay before mailbox reads | exit `3` |
+| OMX worker pane lost | stale lease plus one exact adapter/OMC runtime and no competing pane | create one recovery worker controller and increment fencing generation | exit `3` |
+| tmux session lost | process identities absent and provider state terminal or safely resumable | recreate only the exact missing controller session | exit `3` |
+| PID reused | PID start time or executable identity mismatch | treat as absent, never signal it | exit `3` |
+| Shutdown partially complete | journaled cleanup phase and exact remaining resources | resume next idempotent cleanup step | exit `7` |
+| After main fast-forward | merged commit equals journaled integration commit | rerun merged-main verification only | block waves and exit `7` on failure |
+
+### 7.7 Recovery rules
+
+- Replaying a command with the same `command_id` must not start a second OMC Team.
 - A live lease prevents a second adapter from claiming the same OMX Task.
 - A stale lease is recoverable only when exact Task, worktree, Team, and process evidence identify one owner.
 - Zero or multiple candidates fail closed.
@@ -261,7 +339,16 @@ Terminal alternatives are `failed` and `cancelled`. `blocked` is a reviewable ho
 
 Pure OMX and Hybrid Tasks both use a Task integration branch and worktree. In Hybrid mode, the OMC Team works only inside the adapter-owned execution worktree or its provider-created worker worktrees. OMC auto-merge targets the adapter execution branch, never `main`.
 
-For a single Task, OMC writing must stop before OMX performs direct repair in the same integration surface. Across independent Tasks, OMC execution and OMX review may overlap when their exact write scopes do not conflict. Shared migrations and protocol predecessors remain serialized by the DAG.
+OMC-to-OMX promotion is a four-step protocol:
+
+1. Freeze: record the exact `omc_result_commit`, provider worker HEADs, clean state, scope proof, and evidence tree.
+2. Quiesce: increment `writer_generation`, send shutdown, require every OMC worker and Claude leader shutdown acknowledgment, terminate and prove absence of the dedicated provider process group including descendants by PID start identity, and prove provider worktrees clean.
+3. Promote and revoke: with no provider process alive, the deterministic runtime core promotes the exact frozen commit tree into the Task integration branch, records `review_base_commit` and equal tree hashes, removes the adapter-owned execution worktree and all provider-created worktrees, and deletes or read-only quarantines every provider-writable path. The adapter performs no promotion write.
+4. Transfer writer authority: retain the adapter's non-writing Task claim, grant the OMX leader generation N+1 filesystem write ownership, and journal the split authorities. OMX must not write before provider paths are absent or read-only quarantined. The adapter releases its claim only when the leader later approves `omx_verified`, or through claim-safe cancellation/failure.
+
+A delayed event holding generation N is rejected. Direct filesystem fencing is provided by proving the full provider process group absent and removing its worktrees before generation N+1 exists; shutdown acknowledgment alone is insufficient. Any unknown descendant process, open provider worktree, or filesystem change blocks transfer and returns exit `3`.
+
+Across independent Tasks, OMC execution and OMX review may overlap only after normalized `Allowed Files` conflict checks pass. Shared migrations and protocol predecessors remain serialized by the DAG.
 
 ## 9. Repository Layout
 
@@ -301,6 +388,8 @@ Python is the preferred CLI and protocol implementation language. Existing shell
 - Audit OMX, OMC, Codex, Claude, and Skill source licenses before redistribution.
 - Do not publish copied implementation until provenance and redistribution rights are documented.
 
+The public repository initially contains original design-only material. “Publication” in P0 means publishing that original specification. “Redistribution” means committing imported or adapted implementation from OMX, OMC, local Skills, or other sources; redistribution is forbidden until each file has a provenance entry, source license, transformation policy, and approval. The repository may remain public while implementation directories stay empty.
+
 ## 11. Testing Strategy
 
 ### Contract tests
@@ -309,7 +398,7 @@ Python is the preferred CLI and protocol implementation language. Existing shell
 - DAG acyclicity and wave legality.
 - Command/event envelope compatibility.
 - Claim, lease, transition, and idempotency behavior.
-- Cross-version rejection and migration behavior.
+- Exact supported-version acceptance and unsupported-version rejection. Cross-version state migration is deferred from version 1.
 
 ### Fake-runtime tests
 
@@ -325,6 +414,7 @@ Cover:
 - Stale leases and zero/multiple recovery candidates.
 - Scope escape, dirty worktree, protected reference, and verification mutation rejection.
 - Rebase conflict, main drift, shutdown failure, and post-merge verification failure.
+- Exit-code, retained-resource, journal-phase, Git-HEAD, and no-duplicate-runtime assertions for each recovery matrix row.
 
 ### Forward tests
 
@@ -341,13 +431,13 @@ Before version 1 release, verify:
 
 Create the public repository, publish this reviewed design, define provenance policy, and configure basic documentation validation.
 
-### P1: pure OMX baseline
+### P1: common contracts and provenance
 
-Port or reimplement the Goal compiler and pure OMX lifecycle after provenance review. Expose `loop-engineer run omx` and retain script compatibility.
+Freeze versioned Goal, Task, plan, command, event, claim, lease, evidence, handoff, writer-fence, and recovery schemas. Establish the provenance manifest and supported OMX/OMC version probe before importing runtime implementation.
 
-### P2: common contracts
+### P2: pure OMX baseline
 
-Freeze versioned Goal, Task, plan, event, claim, lease, evidence, handoff, and recovery schemas.
+Port or reimplement the Goal compiler and pure OMX lifecycle against P1 contracts. Expose `loop-engineer run omx` and retain script compatibility.
 
 ### P3: OMC executor-adapter MVP
 
@@ -367,7 +457,7 @@ Publish concise `define-goal`, `goal-to-omx-team`, and `goal-to-omx-omc-team` Sk
 
 ### P7: release qualification
 
-Run contract, fake-runtime, recovery, and three real-project forward scenarios. Publish only after provenance, security, and compatibility gates pass.
+Run contract, fake-runtime, recovery, and three real-project forward scenarios. Tag the first stable release only after provenance, security, and compatibility gates pass.
 
 ## 13. Acceptance Criteria
 
@@ -378,18 +468,20 @@ The first stable release is complete only when:
 3. OMX can issue at least three real-time follow-up assignments without restarting the OMC Team.
 4. OMC cannot approve repository completion or merge `main`.
 5. OMX owns review, correction decisions, final verification, and integration.
-6. All runtime stages resume through the same operator command after interruption.
-7. Independent Tasks can overlap while finishers and `main` integration remain serialized.
-8. Fake-runtime tests launch no real Team and cover ambiguity, stale ownership, failure, and recovery.
-9. Published code has documented provenance and redistribution permission.
-10. Skills contain workflow guidance while deterministic lifecycle behavior remains in tested code.
+6. Rerunning the original `run` command after every recovery-matrix failure either reaches the next legal phase with exit `0` or returns the specified fail-closed exit while preserving the required journal and resources.
+7. `resume` resolves exactly one recorded run or exits `3`; it is behaviorally equivalent to rerunning that run command.
+8. The scheduler rejects unordered normalized `Allowed Files` overlap with exit `2`; independent non-overlapping Tasks can overlap while finishers and `main` integration remain serialized.
+9. Every successful writer transfer proves OMC shutdown acknowledgments, a new fencing generation, identical pinned tree hashes, and no later old-generation mutation.
+10. Rebase conflict and main drift leave main unchanged; post-merge verification failure leaves main forward-only, blocks later waves, and retains repair evidence with exit `7`.
+11. Fake-runtime tests launch no real Team and assert journal, lease, process, Git, exit-code, and no-duplicate-runtime outcomes for every recovery stage.
+12. Every redistributed implementation file has documented provenance and redistribution permission.
+13. Skills contain workflow guidance while deterministic lifecycle behavior remains in tested code.
 
 ## 14. Open Design Decisions
 
 These decisions belong in the implementation plan after this specification is approved:
 
 - Exact Python packaging and minimum supported Python version.
-- JSON Schema draft and event journal storage format.
-- Whether the adapter process is launched as a dedicated OMX worker CLI mode or as a wrapper around a standard worker pane.
-- Compatibility policy across OMX and OMC versions.
-- Initial public license after third-party provenance review.
+- JSON Schema draft and append-only event journal storage engine.
+- Exact initial supported OMX and OMC version ranges, selected during the P1 capability probe.
+- Initial public implementation license after third-party provenance review.
