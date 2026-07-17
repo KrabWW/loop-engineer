@@ -179,3 +179,57 @@ class BoardStore:
                     )
             except ScopeError as e:
                 raise ScopeOverlapError(str(e)) from e
+
+    def _verify_token(self, entry: TaskBoardEntry, raw_token: str) -> None:
+        if entry.claim is None:
+            raise WrongTokenError("no active claim")
+        digest = "sha256:" + hashlib.sha256(raw_token.encode()).hexdigest()
+        if digest != entry.claim.token_digest:
+            raise WrongTokenError("token digest mismatch")
+
+    def release(self, task_id: str, raw_token: str) -> None:
+        with self._locked():
+            state = self._load()
+            entry = state.tasks.get(task_id)
+            if entry is None:
+                raise KeyError(f"unknown task {task_id!r}")
+            if entry.status != TaskRunStatus.CLAIMED:
+                raise PriorStateError(f"task {task_id} is {entry.status.value}, not claimed")
+            self._verify_token(entry, raw_token)
+            entry.status = TaskRunStatus.RELEASED
+            entry.claim = None
+            entry.lease = None
+            entry.provider = None
+            self._save(state)
+
+    def complete(self, task_id: str, raw_token: str) -> None:
+        with self._locked():
+            state = self._load()
+            entry = state.tasks.get(task_id)
+            if entry is None:
+                raise KeyError(f"unknown task {task_id!r}")
+            if entry.status != TaskRunStatus.CLAIMED:
+                raise PriorStateError(f"task {task_id} is {entry.status.value}, not claimed")
+            self._verify_token(entry, raw_token)
+            entry.status = TaskRunStatus.DONE
+            entry.claim = None
+            entry.lease = None
+            entry.provider = None
+            self._save(state)
+
+    def reset_to_pending(self, task_id: str) -> None:
+        """Move a RELEASED task back to PENDING and bump attempt_id (retry).
+
+        The claim digest was cleared at release, so this coordination op does
+        not re-verify a token; full retry transactions are a P2b concern.
+        """
+        with self._locked():
+            state = self._load()
+            entry = state.tasks.get(task_id)
+            if entry is None:
+                raise KeyError(f"unknown task {task_id!r}")
+            if entry.status != TaskRunStatus.RELEASED:
+                raise PriorStateError(f"task {task_id} is {entry.status.value}, not released")
+            entry.status = TaskRunStatus.PENDING
+            entry.attempt_id += 1
+            self._save(state)

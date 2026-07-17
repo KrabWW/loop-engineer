@@ -4,7 +4,12 @@ from loop_engineer.contracts.lease import Lease
 from loop_engineer.contracts.plan import DependencyEdge, Plan, TaskNode
 from loop_engineer.contracts.provider import Provider
 from loop_engineer.contracts.task import Task, VerificationSpec
-from loop_engineer.runtime.board import BoardStore, PriorStateError, ScopeOverlapError
+from loop_engineer.runtime.board import (
+    BoardStore,
+    PriorStateError,
+    ScopeOverlapError,
+    WrongTokenError,
+)
 
 
 def _plan(task_files: dict[str, list[str]], deps: dict[str, list[str]] | None = None) -> Plan:
@@ -93,3 +98,40 @@ def test_claim_overlap_allowed_when_dependency_ordered(tmp_path):
     store.claim("T1", Provider.OMX, _LEASE)
     token = store.claim("T2", Provider.OMC, _LEASE)
     assert isinstance(token, str)
+
+
+def test_complete_with_correct_token(tmp_path):
+    plan = _plan({"T1": ["src/a.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    token = store.claim("T1", Provider.OMX, _LEASE)
+    store.complete("T1", token)
+    assert store.load_state().tasks["T1"].status.value == "done"
+
+
+def test_complete_wrong_token_rejected(tmp_path):
+    plan = _plan({"T1": ["src/a.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    store.claim("T1", Provider.OMX, _LEASE)
+    with pytest.raises(WrongTokenError):
+        store.complete("T1", "not-the-token")
+
+
+def test_release_returns_to_released(tmp_path):
+    plan = _plan({"T1": ["src/a.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    token = store.claim("T1", Provider.OMX, _LEASE)
+    store.release("T1", token)
+    e = store.load_state().tasks["T1"]
+    assert e.status.value == "released" and e.claim is None
+
+
+def test_reset_to_pending_makes_reclaimable(tmp_path):
+    plan = _plan({"T1": ["src/a.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    token = store.claim("T1", Provider.OMX, _LEASE)
+    store.release("T1", token)
+    store.reset_to_pending("T1")  # coordinator op; no token (claim cleared at release)
+    store.claim("T1", Provider.OMC, _LEASE)  # reclaimable post-reset
+    e = store.load_state().tasks["T1"]
+    assert e.provider == Provider.OMC
+    assert e.attempt_id == 2
