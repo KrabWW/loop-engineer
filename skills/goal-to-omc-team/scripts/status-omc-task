@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf '%s\n' \
+    'Usage: ./scripts/status-omc-task [--watch] [--interval N] [--freshness N] <TASK_ID>' \
+    '' \
+    'Read-only inspection of one running OMC Task team. Never mutates team state.'
+}
+
+find_task_file() {
+  wanted_id=$1
+  matches=$(rg -l --glob '*.md' -- "^# ${wanted_id}( |$)" docs/tasks 2>/dev/null || true)
+  count=$(printf '%s\n' "$matches" | awk 'NF { c += 1 } END { print c + 0 }')
+  [ "$count" -eq 1 ] || fail "expected one task file for ${wanted_id}, found ${count}"
+  printf '%s\n' "$matches"
+}
+
+watch=0
+interval=5
+freshness=300
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --watch) watch=1; shift ;;
+    --interval)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      interval=$2; shift 2 ;;
+    --freshness)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      freshness=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fail "unknown option: $1" ;;
+    *) break ;;
+  esac
+done
+[ "$#" -eq 1 ] || { usage >&2; exit 2; }
+
+task_id=$1
+[[ "$task_id" =~ ^[A-Z][A-Z0-9-]+$ ]] || fail "invalid TASK_ID: ${task_id}"
+
+[[ "$interval" =~ ^[1-9][0-9]*$ ]] || fail '--interval must be a positive integer'
+[[ "$freshness" =~ ^[1-9][0-9]*$ ]] || fail '--freshness must be a positive integer'
+
+for command_name in git rg python3 find date; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
+done
+
+omc_bin=${OMC_BIN:-omc}
+tmux_bin=${TMUX_BIN:-tmux}
+command -v "$omc_bin" >/dev/null 2>&1 || fail "required OMC command not found: ${omc_bin}"
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'not inside a Git repository'
+repo_root=$(cd "$repo_root" && pwd -P)
+
+slug=$(printf '%s' "$task_id" | tr '[:upper:]_' '[:lower:]-')
+branch="codex/omc-qs-${slug}"
+session="omc-qs-${slug}"
+worktree_root=${OMC_TASK_WORKTREE_ROOT:-"$(dirname "$repo_root")/$(basename "$repo_root")-task-worktrees"}
+worktree="${worktree_root}/omc-${slug}"
+git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+state_base="${git_common_dir}/omc-task-state/${slug}"
+
+task_file=$(find_task_file "$task_id" 2>/dev/null || true)
+
+discover_team_dirs() {
+  {
+    find "$state_base" -type d -path '*/state/team/*/workers' 2>/dev/null || true
+    if [ -d "$worktree/.omc/state/team" ]; then
+      find "$worktree/.omc/state/team" -mindepth 2 -maxdepth 2 -type d -name workers 2>/dev/null || true
+    fi
+  } | sed -e 's#.*/state/team/##' -e 's#/workers$##' | awk 'NF && !seen[$0]++' | sort
+}
+
+# Prefer the team name the launcher captured; fall back to discovery.
+team_name=
+if [ -f "$state_base/launch.json" ]; then
+  team_name=$(python3 -c '
+import json
+import sys
+try:
+    print(json.load(open(sys.argv[1])).get("team_name") or "")
+except Exception:
+    pass
+' "$state_base/launch.json" 2>/dev/null || true)
+fi
+if [ -z "$team_name" ]; then
+  candidates=$(discover_team_dirs)
+  candidate_count=$(printf '%s\n' "$candidates" | awk 'NF { c += 1 } END { print c + 0 }')
+  [ "$candidate_count" -gt 0 ] || fail "no OMC team state under ${state_base}; run ./scripts/start-omc-task ${task_id}"
+  [ "$candidate_count" -eq 1 ] || fail "multiple OMC teams under ${state_base}; inspect before continuing"
+  team_name=$(printf '%s\n' "$candidates" | head -1)
+fi
+
+# Locate the team state root (the dir containing workers/) for either layout.
+workers_dir=$({
+  find "$state_base" -type d -path "*/state/team/${team_name}/workers" 2>/dev/null || true
+  if [ -d "$worktree/.omc/state/team/${team_name}/workers" ]; then
+    printf '%s\n' "$worktree/.omc/state/team/${team_name}/workers"
+  fi
+} | head -1)
+[ -n "$workers_dir" ] || fail "team state for ${team_name} not found under ${state_base}"
+
+leader_pane=
+if [ -f "$state_base/launch.json" ]; then
+  leader_pane=$(python3 -c '
+import json
+import sys
+try:
+    print(json.load(open(sys.argv[1])).get("leader_pane") or "")
+except Exception:
+    pass
+' "$state_base/launch.json" 2>/dev/null || true)
+fi
+
+leader_pane_alive() {
+  [ -n "$leader_pane" ] || return 1
+  [ -d "$worktree" ] || return 1
+  pane_dead=$("$tmux_bin" display-message -p -t "$leader_pane" '#{pane_dead}' 2>/dev/null) || return 1
+  [ "$pane_dead" = 0 ]
+}
+
+result_phase=
+result_heartbeat=fresh
+snapshot() {
+  now=$(date +%s)
+  set +e
+  summary_json=$(cd "$worktree" 2>/dev/null && OMC_RUNTIME_V2=1 OMC_STATE_DIR="$state_base" OMC_TEAM_WORKTREE_MODE=branch \
+    "$omc_bin" team api get-summary --input "{\"team_name\":\"${team_name}\"}" --json 2>/dev/null)
+  summary_rc=$?
+  set -e
+  [ "$summary_rc" -eq 0 ] || fail "could not read team summary for ${team_name}"
+  parsed=$(printf '%s\n' "$summary_json" | python3 -c '
+import json
+import sys
+try:
+    p = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+s = (p.get("data") or {}).get("summary") or {}
+if not p.get("ok") or not s:
+    raise SystemExit(1)
+t = s.get("tasks") or {}
+ws = s.get("workers") or []
+nonrep = s.get("nonReportingWorkers") or []
+total = t.get("total", -1)
+completed = t.get("completed", -1)
+failed = t.get("failed", -1)
+pending = t.get("pending", -1)
+in_progress = t.get("in_progress", -1)
+blocked = t.get("blocked", -1)
+wcount = s.get("workerCount", -1)
+alive = sum(1 for w in ws if w.get("alive"))
+dead = (wcount - alive) if wcount >= 0 else -1
+if isinstance(total, int) and total > 0 and completed == total and pending == 0 and in_progress == 0 and failed == 0 and blocked == 0 and not nonrep:
+    phase = "complete"
+elif isinstance(failed, int) and failed > 0:
+    phase = "failed"
+else:
+    phase = "active"
+print(" ".join(str(v) for v in [phase, total, pending, blocked, in_progress, completed, failed, wcount, alive, dead, len(nonrep)]))
+') || fail "invalid team summary JSON for ${team_name}"
+  read -r phase total pending blocked in_progress completed failed w_total w_alive w_dead w_nonrep <<EOF
+$parsed
+EOF
+  result_phase=$phase
+
+  max_age=0
+  if [ -d "$workers_dir" ]; then
+    for worker_dir in "$workers_dir"/*/; do
+      [ -d "$worker_dir" ] || continue
+      worker=$(basename "$worker_dir")
+      hb=$(cd "$worktree" 2>/dev/null && OMC_RUNTIME_V2=1 OMC_STATE_DIR="$state_base" OMC_TEAM_WORKTREE_MODE=branch \
+        "$omc_bin" team api read-worker-heartbeat --input "{\"team_name\":\"${team_name}\",\"worker\":\"${worker}\"}" --json 2>/dev/null || true)
+      ts=$(printf '%s\n' "$hb" | python3 -c '
+import json
+import sys
+try:
+    p = json.load(sys.stdin)
+    hb = (p.get("data") or {}).get("heartbeat")
+    print(int(hb.get("ts", 0)) if isinstance(hb, dict) else 0)
+except Exception:
+    print(0)
+' 2>/dev/null || echo 0)
+      age=$((now - ts))
+      [ "$age" -ge "$max_age" ] && max_age=$age
+    done
+  fi
+  if [ "$max_age" -le "$freshness" ]; then
+    heartbeat_status=fresh
+  else
+    heartbeat_status=stale
+  fi
+  result_heartbeat=$heartbeat_status
+
+  if leader_pane_alive; then leader_alive=true; else leader_alive=false; fi
+
+  printf 'task_id=%s\n' "$task_id"
+  [ -z "$task_file" ] || printf 'task_file=%s\n' "$task_file"
+  printf 'branch=%s\n' "$branch"
+  printf 'worktree=%s\n' "$worktree"
+  printf 'tmux_session=%s\n' "$session"
+  printf 'state_base=%s\n' "$state_base"
+  printf 'team_name=%s\n' "$team_name"
+  printf 'leader_pane=%s\n' "${leader_pane:-unknown}"
+  printf 'leader_alive=%s\n' "$leader_alive"
+  printf 'phase=%s\n' "$phase"
+  printf 'tasks_total=%s pending=%s blocked=%s in_progress=%s completed=%s failed=%s\n' \
+    "$total" "$pending" "$blocked" "$in_progress" "$completed" "$failed"
+  printf 'workers_total=%s alive=%s dead=%s non_reporting=%s\n' "$w_total" "$w_alive" "$w_dead" "$w_nonrep"
+  printf 'heartbeat_age_s=%s heartbeat=%s\n' "$max_age" "$heartbeat_status"
+  printf 'attach=tmux attach -t %s\n' "$session"
+  printf 'finish=./scripts/finish-omc-task %s\n' "$task_id"
+}
+
+if [ "$watch" -eq 1 ]; then
+  while true; do
+    snapshot
+    case "$result_phase" in
+      complete) exit 0 ;;
+      failed) fail "team reached terminal failed for ${task_id}" ;;
+    esac
+    sleep "$interval"
+  done
+fi
+
+snapshot
+if [ "$result_phase" = complete ]; then
+  exit 0
+fi
+if [ "$result_heartbeat" = stale ]; then
+  exit 2
+fi
+exit 0

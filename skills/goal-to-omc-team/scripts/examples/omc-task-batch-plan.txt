@@ -1,0 +1,10 @@
+# OMC Task batch plan (custom mode: each non-empty line is one parallel wave;
+# waves run serially and finish/rebase/merge never overlap across waves).
+#
+# Replace these sample Task IDs with real ones from docs/tasks/. Each line may
+# list several independent Tasks (parallel within the wave); separate waves
+# with newlines so they become strict barriers.
+
+PROTO-EXAMPLE-A-001, PROTO-EXAMPLE-B-001
+BE-EXAMPLE-001
+FE-EXAMPLE-001, ACT-EXAMPLE-001

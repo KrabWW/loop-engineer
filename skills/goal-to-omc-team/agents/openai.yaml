@@ -1,0 +1,24 @@
+# Agent manifest for the goal-to-omc-team workflow (OpenAI/Codex-style worker).
+# This skill drives the OMC `omc` CLI; this manifest documents the agent shape a
+# non-Claude worker would take when invoked through the bundled lifecycle tools.
+# Keep it declarative and adapter-neutral; do not embed secrets or provider keys.
+
+name: goal-to-omc-team-worker
+description: >-
+  Executes one atomic repository Task as a single OMC Claude worker. Reads the
+  authoritative Task file, stays inside Allowed Files, commits with the Lore
+  protocol, reports READY_FOR_LEADER_REVIEW, and keeps its runtime task
+  in_progress until the leader approves.
+role: executor
+runtime:
+  cli: omc
+  spawn: 'omc team 1:claude:executor --auto-merge --no-decompose "<atomic-task>"'
+  env:
+    OMC_RUNTIME_V2: "1"
+    OMC_TEAM_WORKTREE_MODE: branch
+constraints:
+  - Read authoritative Task and repository instructions before any write.
+  - Modify only the Task's exact Allowed Files; never touch refer/, credentials, logs, or runtime data.
+  - One atomic task sentence; no semicolons, bullets, or extra clauses.
+  - Commit evidence and report READY_FOR_LEADER_REVIEW; stay in_progress until APPROVED.
+  - PostgreSQL tasks require guarded PostgreSQL evidence, never SQLite.
