@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from loop_engineer.compiler.definition import GoalDefinition
 from loop_engineer.contracts.claim import Claim
 from loop_engineer.contracts.command import CommandEnvelope
 from loop_engineer.contracts.event import EventEnvelope
@@ -32,6 +33,7 @@ MANIFEST = ROOT / "schemas" / "manifest.json"
 
 MODELS = {
     "goal": Goal,
+    "goal_definition": GoalDefinition,
     "task": Task,
     "plan": Plan,
     "command": CommandEnvelope,

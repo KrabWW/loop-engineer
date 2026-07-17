@@ -30,6 +30,11 @@
       "sha256": "2fb5dbea4070d0d289d3d73e4671541f4fa1f43f19466f6ed3b64f3a50942c6e",
       "version": 1
     },
+    "goal_definition": {
+      "file": "v1/goal_definition.schema.json",
+      "sha256": "5c0020831048e6e2db5b32495fecda7671a16f95f4aad840ad50c08fa6451973",
+      "version": 1
+    },
     "handoff": {
       "file": "v1/handoff.schema.json",
       "sha256": "e9582d44f7b5aef7f68672dd0e5c6bc5522a02cecdf5467b73f6a496dfab6288",
