@@ -1,0 +1,5 @@
+# Strict dependency order; one Task integration worktree and OMX Team at a time.
+PROTO-INTEGRATIONS-001
+PROTO-AUDIT-001
+PROTO-AI-001
+PROTO-KNOWLEDGE-002

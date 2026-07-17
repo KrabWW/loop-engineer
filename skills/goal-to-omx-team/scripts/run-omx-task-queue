@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  print_recovery
+  exit 1
+}
+
+print_recovery() {
+  if [ -n "${active_task:-}" ]; then
+    printf 'recovery_task=%s\n' "$active_task" >&2
+    printf 'recovery_worktree=%s\n' "${active_worktree:-unknown}" >&2
+    printf 'recovery_team=%s\n' "${active_team:-unknown}" >&2
+    printf 'recovery_tmux_session=%s\n' "${active_session:-unknown}" >&2
+    printf 'recovery_leader_pane=%s\n' "${active_leader_pane:-unknown}" >&2
+  fi
+}
+
+usage() {
+  printf '%s\n' \
+    'Usage: ./scripts/run-omx-task-queue [--dry-run] [--hours N] [--finish-current] <QUEUE_FILE>' \
+    '' \
+    'Run Task IDs sequentially. The only supported deadline policy finishes an active Task' \
+    'but starts no new Task after the deadline.'
+}
+
+read_field() {
+  field=$1
+  file=$2
+  awk -v field="$field" '
+    index($0, field ": ") == 1 {
+      line = $0
+      sub(/^[^:]+: /, "", line)
+      gsub(/`/, "", line)
+      print line
+      exit
+    }
+  ' "$file"
+}
+
+output_value() {
+  key=$1
+  content=$2
+  printf '%s\n' "$content" | sed -n "s/^${key}=//p" | tail -1
+}
+
+append_journal() {
+  event=$1
+  task=${2:-}
+  detail=${3:-}
+  python3 - "$journal_file" "$event" "$task" "$detail" <<'PY'
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+record = {
+    "at": datetime.now(timezone.utc).isoformat(),
+    "event": sys.argv[2],
+    "task": sys.argv[3] or None,
+    "detail": sys.argv[4] or None,
+}
+with path.open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, sort_keys=True) + "\n")
+PY
+}
+
+parse_status() {
+  python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+tasks = payload.get("tasks") or {}
+workers = payload.get("workers") or {}
+values = [
+    payload.get("status", "missing"),
+    payload.get("phase", "missing"),
+    tasks.get("total", -1),
+    tasks.get("pending", -1),
+    tasks.get("blocked", -1),
+    tasks.get("in_progress", -1),
+    tasks.get("completed", -1),
+    tasks.get("failed", -1),
+    workers.get("dead", -1),
+    workers.get("non_reporting", -1),
+]
+print(" ".join(str(value) for value in values))
+'
+}
+
+dry_run=0
+hours=12
+finish_current=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=1; shift ;;
+    --hours)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      hours=$2
+      shift 2
+      ;;
+    --finish-current) finish_current=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fail "unknown option: $1" ;;
+    *) break ;;
+  esac
+done
+[ "$#" -eq 1 ] || { usage >&2; exit 2; }
+[[ "$hours" =~ ^[0-9]+$ ]] || fail '--hours must be a non-negative integer'
+[ "$finish_current" -eq 1 ] || fail 'only the finish-current deadline policy is supported'
+
+for command_name in git rg python3; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
+done
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'not inside a Git repository'
+repo_root=$(cd "$repo_root" && pwd -P)
+[ "$(pwd -P)" = "$repo_root" ] || fail "run from repository root: ${repo_root}"
+[ "$(git branch --show-current)" = main ] || fail 'current branch must be main'
+[ -z "$(git status --porcelain)" ] || fail 'main worktree is not clean'
+
+queue_file=$1
+[ -f "$queue_file" ] || fail "queue file not found: ${queue_file}"
+queue_file=$(cd "$(dirname "$queue_file")" && pwd -P)/$(basename "$queue_file")
+
+tasks=()
+task_count=0
+while IFS= read -r line || [ -n "$line" ]; do
+  line=${line%%#*}
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
+  [ -n "$line" ] || continue
+  [[ "$line" =~ ^[A-Z][A-Z0-9-]+$ ]] || fail "invalid TASK_ID in queue: ${line}"
+  for (( task_index = 0; task_index < task_count; task_index += 1 )); do
+    existing_task=${tasks[$task_index]}
+    [ "$existing_task" != "$line" ] || fail "duplicate TASK_ID in queue: ${line}"
+  done
+  tasks[$task_count]=$line
+  task_count=$((task_count + 1))
+done < "$queue_file"
+[ "$task_count" -gt 0 ] || fail 'queue contains no Task IDs'
+
+starter=${OMX_TASK_STARTER:-"${repo_root}/scripts/start-omx-task"}
+finisher=${OMX_TASK_FINISHER:-"${repo_root}/scripts/finish-omx-task"}
+omx_bin=${OMX_BIN:-omx}
+tmux_bin=${TMUX_BIN:-tmux}
+await_ms=${OMX_QUEUE_AWAIT_MS:-30000}
+[[ "$await_ms" =~ ^[1-9][0-9]*$ ]] || fail 'OMX_QUEUE_AWAIT_MS must be positive'
+
+if [ "$dry_run" -eq 1 ]; then
+  printf 'queue_status=dry-run\n'
+  printf 'hours=%s\n' "$hours"
+  printf 'deadline_policy=finish-current\n'
+  printf 'tasks=%s\n' "$task_count"
+  for task in "${tasks[@]}"; do
+    printf 'task=%s\n' "$task"
+  done
+  exit 0
+fi
+
+[ -x "$starter" ] || fail "Task launcher is not executable: ${starter}"
+[ -x "$finisher" ] || fail "Task finisher is not executable: ${finisher}"
+command -v "$omx_bin" >/dev/null 2>&1 || fail "OMX command not found: ${omx_bin}"
+command -v "$tmux_bin" >/dev/null 2>&1 || fail "tmux command not found: ${tmux_bin}"
+git check-ignore -q .omx/queue/launcher-probe || fail '.omx/queue must be ignored'
+
+duration_seconds=${OMX_QUEUE_DURATION_SECONDS:-$((hours * 3600))}
+[[ "$duration_seconds" =~ ^[0-9]+$ ]] || fail 'OMX_QUEUE_DURATION_SECONDS must be non-negative'
+started_at=$(date +%s)
+deadline=$((started_at + duration_seconds))
+journal_dir="${repo_root}/.omx/queue"
+journal_file="${journal_dir}/$(date -u +%Y%m%dT%H%M%SZ)-$$.jsonl"
+mkdir -p "$journal_dir"
+append_journal queue_started '' "tasks=${task_count} hours=${hours}"
+
+active_task=
+active_worktree=
+active_team=
+active_session=
+active_leader_pane=
+on_interrupt() {
+  append_journal interrupted "${active_task:-}" 'resources preserved'
+  printf 'ERROR: queue interrupted; active resources were preserved\n' >&2
+  print_recovery
+  exit 130
+}
+trap on_interrupt INT TERM HUP
+
+completed_count=0
+for task in "${tasks[@]}"; do
+  now=$(date +%s)
+  if [ "$now" -ge "$deadline" ]; then
+    append_journal deadline_reached "$task" 'no new Task started'
+    printf 'queue_status=deadline\n'
+    printf 'completed=%s\n' "$completed_count"
+    printf 'next_task=%s\n' "$task"
+    printf 'journal=%s\n' "$journal_file"
+    exit 0
+  fi
+
+  base_sha=$(git rev-parse main)
+  append_journal task_starting "$task" "$base_sha"
+  set +e
+  launch_output=$("$starter" --allow-derived-ready "$task" 2>&1)
+  launch_rc=$?
+  set -e
+  if [ "$launch_rc" -ne 0 ]; then
+    append_journal task_start_failed "$task" "exit=${launch_rc}"
+    printf '%s\n' "$launch_output" >&2
+    fail "Task launcher failed for ${task}"
+  fi
+
+  active_task=$task
+  active_worktree=$(output_value worktree "$launch_output")
+  active_team=$(output_value team_name "$launch_output")
+  active_session=$(output_value tmux_session "$launch_output")
+  active_leader_pane=$(output_value leader_pane "$launch_output")
+  active_branch=$(output_value branch "$launch_output")
+  active_task_file=$(output_value task_file "$launch_output")
+  [ -d "$active_worktree" ] || fail "launcher returned missing worktree: ${active_worktree}"
+  [[ "$active_team" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || fail 'launcher returned invalid team name'
+  [[ "$active_branch" =~ ^codex/qs-[a-z0-9-]+$ ]] || fail 'launcher returned invalid branch'
+  [ -n "$active_session" ] || fail 'launcher returned no tmux session'
+  [[ "$active_leader_pane" =~ ^%[0-9]+$ ]] || fail 'launcher returned invalid leader pane'
+  [ -n "$active_task_file" ] || fail 'launcher returned no task file'
+  append_journal task_started "$task" "team=${active_team} worktree=${active_worktree}"
+  printf 'task_started=%s team=%s\n' "$task" "$active_team"
+
+  final_status_json=
+  while true; do
+    pane_dead=$("$tmux_bin" display-message -p -t "$active_leader_pane" '#{pane_dead}' 2>/dev/null) || \
+      fail "persistent leader pane is missing for ${task}: ${active_leader_pane}"
+    [ "$pane_dead" = 0 ] || fail "persistent leader pane is dead for ${task}: ${active_leader_pane}"
+    set +e
+    status_json=$(cd "$active_worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$active_worktree" \
+      "$omx_bin" team status "$active_team" --json 2>&1)
+    status_rc=$?
+    set -e
+    [ "$status_rc" -eq 0 ] || fail "could not read team status for ${task}: ${status_json}"
+    set +e
+    parsed=$(printf '%s\n' "$status_json" | parse_status 2>/dev/null)
+    parsed_rc=$?
+    set -e
+    [ "$parsed_rc" -eq 0 ] || fail "invalid team status JSON for ${task}"
+    read -r runtime_status phase total pending blocked in_progress completed failed dead non_reporting <<EOF
+$parsed
+EOF
+    [ "$runtime_status" = ok ] || fail "team state is ${runtime_status} for ${task}"
+    [ "$phase" != missing ] || fail "team status omitted phase for ${task}"
+    [ "$failed" -eq 0 ] || fail "team reported failed tasks for ${task}"
+    [ "$blocked" -eq 0 ] || fail "team reported blocked tasks for ${task}"
+    [ "$dead" -eq 0 ] || fail "team reported dead workers for ${task}"
+    [ "$non_reporting" -eq 0 ] || fail "team reported non-reporting workers for ${task}"
+    case "$phase" in
+      failed|cancelled) fail "team reached terminal failure phase ${phase} for ${task}" ;;
+      complete)
+        [ "$pending" -eq 0 ] || fail "complete team still has pending tasks for ${task}"
+        [ "$in_progress" -eq 0 ] || fail "complete team still has in-progress tasks for ${task}"
+        [ "$blocked" -eq 0 ] || fail "complete team still has blocked tasks for ${task}"
+      [ "$total" -gt 0 ] || fail "team reported no tasks for ${task}"
+      [ "$completed" -eq "$total" ] || fail "team terminal counts are inconsistent for ${task}"
+        pane_dead=$("$tmux_bin" display-message -p -t "$active_leader_pane" '#{pane_dead}' 2>/dev/null) || \
+          fail "persistent leader pane exited before terminal acceptance for ${task}: ${active_leader_pane}"
+        [ "$pane_dead" = 0 ] || fail "persistent leader pane is dead at terminal acceptance for ${task}: ${active_leader_pane}"
+      final_status_json=$status_json
+      break
+        ;;
+      team-plan|team-prd|team-exec|team-verify|team-fix) ;;
+      *) fail "unknown team phase ${phase} for ${task}" ;;
+    esac
+    set +e
+    await_output=$(cd "$active_worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$active_worktree" \
+      "$omx_bin" team await "$active_team" --timeout-ms "$await_ms" --json 2>&1)
+    await_rc=$?
+    set -e
+    [ "$await_rc" -eq 0 ] || fail "team await failed for ${task}: ${await_output}"
+  done
+
+  pane_dead=$("$tmux_bin" display-message -p -t "$active_leader_pane" '#{pane_dead}' 2>/dev/null) || \
+    fail "persistent leader pane exited before evidence journal for ${task}: ${active_leader_pane}"
+  [ "$pane_dead" = 0 ] || fail "persistent leader pane is dead before evidence journal for ${task}: ${active_leader_pane}"
+  append_journal task_terminal "$task" "$final_status_json"
+
+  set +e
+  finish_output=$("$finisher" "$task" 2>&1)
+  finish_rc=$?
+  set -e
+  if [ "$finish_rc" -ne 0 ]; then
+    printf '%s\n' "$finish_output" >&2
+    fail "Task finisher failed for ${task}"
+  fi
+  [ "$(output_value mode "$finish_output")" = finished ] || fail "Task finisher returned no finished mode for ${task}"
+  integrated_head=$(output_value main_after "$finish_output")
+  [ "$integrated_head" = "$(git rev-parse HEAD)" ] || fail "Task finisher main_after mismatch for ${task}"
+  [ -z "$(git status --porcelain)" ] || fail 'main worktree is dirty after integration'
+  append_journal task_integrated "$task" "$integrated_head"
+  printf 'task_completed=%s commit=%s\n' "$task" "$(git rev-parse --short HEAD)"
+  completed_count=$((completed_count + 1))
+  active_task=
+  active_worktree=
+  active_team=
+  active_session=
+  active_leader_pane=
+done
+
+append_journal queue_completed '' "completed=${completed_count}"
+printf 'queue_status=complete\n'
+printf 'completed=%s\n' "$completed_count"
+printf 'journal=%s\n' "$journal_file"

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf '%s\n' \
+    'Usage: install-omx-task-lifecycle [--force] <REPOSITORY>' \
+    '' \
+    'Install the verified start, finish, batch, example, and fake-test bundle.'
+}
+
+force=0
+if [ "${1:-}" = --force ]; then
+  force=1
+  shift
+fi
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+[ "$#" -eq 1 ] || { usage >&2; exit 2; }
+
+for command_name in git cmp install mkdir bash; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
+done
+
+script_dir=$(cd "$(dirname "$0")" && pwd -P)
+skill_root=$(cd "$script_dir/.." && pwd -P)
+repo=$1
+[ -d "$repo" ] || fail "repository directory not found: ${repo}"
+repo=$(cd "$repo" && pwd -P)
+[ "$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" = "$repo" ] || fail "target is not a Git repository root: ${repo}"
+
+sources=(
+  scripts/start-omx-task
+  scripts/finish-omx-task
+  scripts/run-omx-task-batch
+  scripts/tests/test-start-omx-task.sh
+  scripts/tests/test-finish-omx-task.sh
+  scripts/tests/test-run-omx-task-batch.sh
+  examples/omx-task-batch-plan.txt
+)
+targets=(
+  scripts/start-omx-task
+  scripts/finish-omx-task
+  scripts/run-omx-task-batch
+  scripts/tests/test-start-omx-task.sh
+  scripts/tests/test-finish-omx-task.sh
+  scripts/tests/test-run-omx-task-batch.sh
+  scripts/examples/omx-task-batch-plan.txt
+)
+
+bash -n \
+  "$skill_root/scripts/start-omx-task" \
+  "$skill_root/scripts/finish-omx-task" \
+  "$skill_root/scripts/run-omx-task-batch" \
+  "$skill_root/scripts/tests/test-start-omx-task.sh" \
+  "$skill_root/scripts/tests/test-finish-omx-task.sh" \
+  "$skill_root/scripts/tests/test-run-omx-task-batch.sh"
+
+index=0
+while [ "$index" -lt "${#sources[@]}" ]; do
+  source_path="${skill_root}/${sources[$index]}"
+  target_path="${repo}/${targets[$index]}"
+  [ -f "$source_path" ] || fail "skill bundle is incomplete: ${source_path}"
+  if [ -e "$target_path" ] && ! cmp -s "$source_path" "$target_path" && [ "$force" -ne 1 ]; then
+    fail "target differs; rerun with --force: ${target_path}"
+  fi
+  index=$((index + 1))
+done
+
+index=0
+while [ "$index" -lt "${#sources[@]}" ]; do
+  source_path="${skill_root}/${sources[$index]}"
+  target_path="${repo}/${targets[$index]}"
+  mkdir -p "$(dirname "$target_path")"
+  case "$target_path" in
+    *.txt) install -m 0644 "$source_path" "$target_path" ;;
+    *) install -m 0755 "$source_path" "$target_path" ;;
+  esac
+  index=$((index + 1))
+done
+
+bash -n \
+  "$repo/scripts/start-omx-task" \
+  "$repo/scripts/finish-omx-task" \
+  "$repo/scripts/run-omx-task-batch" \
+  "$repo/scripts/tests/test-start-omx-task.sh" \
+  "$repo/scripts/tests/test-finish-omx-task.sh" \
+  "$repo/scripts/tests/test-run-omx-task-batch.sh"
+
+printf 'mode=installed\n'
+printf 'repository=%s\n' "$repo"
+printf 'start=./scripts/start-omx-task <TASK_ID>\n'
+printf 'finish=./scripts/finish-omx-task <TASK_ID>\n'
+printf 'batch=./scripts/run-omx-task-batch --mode custom scripts/examples/omx-task-batch-plan.txt\n'

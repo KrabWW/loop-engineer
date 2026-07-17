@@ -1,0 +1,578 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf '%s\n' \
+    'Usage: ./scripts/start-omx-task [--dry-run] [--resume-existing] [--allow-derived-ready] <TASK_ID>' \
+    '' \
+    'Create one clean Task integration worktree and start its OMX team in tmux.'
+}
+
+read_field() {
+  field=$1
+  file=$2
+  awk -v field="$field" '
+    index($0, field ": ") == 1 {
+      line = $0
+      sub(/^[^:]+: /, "", line)
+      gsub(/`/, "", line)
+      print line
+      exit
+    }
+  ' "$file"
+}
+
+find_task_file() {
+  wanted_id=$1
+  matches=$(rg -l --glob '*.md' -- "^# ${wanted_id}( |$)" docs/tasks 2>/dev/null || true)
+  count=$(printf '%s\n' "$matches" | awk 'NF { count += 1 } END { print count + 0 }')
+  [ "$count" -eq 1 ] || fail "expected one task file for ${wanted_id}, found ${count}"
+  printf '%s\n' "$matches"
+}
+
+task_goal() {
+  awk '
+    /^## Goal[[:space:]]*$/ { in_goal = 1; next }
+    in_goal && /^## / { exit }
+    in_goal && NF {
+      line = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      text = text (text == "" ? "" : " ") line
+    }
+    END { print text }
+  ' "$1"
+}
+
+task_allows_file() {
+  wanted=$1
+  file=$2
+  allowed=$(awk '
+    /^## Allowed Files[[:space:]]*$/ { in_allowed = 1; next }
+    in_allowed && /^## / { exit }
+    in_allowed { print }
+  ' "$file"
+  )
+  printf '%s\n' "$allowed" | rg -F -x -- "- \`${wanted}\`" >/dev/null
+}
+
+reference_fingerprint() {
+  python3 - "$1" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+digest = hashlib.sha256()
+digest.update(b"content-v2\n")
+if not root.exists():
+    digest.update(b"absent\n")
+else:
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(name for name in dirs if name not in {".git", ".omx"})
+        files = sorted(name for name in files if name != ".DS_Store")
+        current_path = Path(current)
+        for name in dirs + files:
+            path = current_path / name
+            info = os.lstat(path)
+            relative = path.relative_to(root).as_posix()
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISLNK(info.st_mode):
+                record = f"link\0{relative}\0{mode:o}\0{os.readlink(path)}\n".encode()
+            elif stat.S_ISREG(info.st_mode):
+                content = hashlib.sha256(path.read_bytes()).hexdigest()
+                record = f"file\0{relative}\0{mode:o}\0{content}\n".encode()
+            elif stat.S_ISDIR(info.st_mode):
+                record = f"dir\0{relative}\0{mode:o}\n".encode()
+            else:
+                record = f"special\0{relative}\0{info.st_mode}\n".encode()
+            digest.update(record)
+print(digest.hexdigest())
+PY
+}
+
+refer_fingerprint_version=content-v2
+
+dry_run=0
+resume_existing=0
+allow_derived_ready=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=1; shift ;;
+    --resume-existing) resume_existing=1; shift ;;
+    --allow-derived-ready) allow_derived_ready=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fail "unknown option: $1" ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = '-h' ] || [ "${1:-}" = '--help' ]; then
+  usage
+  exit 0
+fi
+[ "$#" -eq 1 ] || { usage >&2; exit 2; }
+
+task_id=$1
+[[ "$task_id" =~ ^[A-Z][A-Z0-9-]+$ ]] || fail "invalid TASK_ID: ${task_id}"
+
+for command_name in git rg bash df env python3; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
+done
+
+omx_bin=${OMX_BIN:-omx}
+tmux_bin=${TMUX_BIN:-tmux}
+df_bin=${DF_BIN:-df}
+command -v "$omx_bin" >/dev/null 2>&1 || fail "required OMX command not found: ${omx_bin}"
+command -v "$tmux_bin" >/dev/null 2>&1 || fail "required tmux command not found: ${tmux_bin}"
+command -v "$df_bin" >/dev/null 2>&1 || fail "required df command not found: ${df_bin}"
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'not inside a Git repository'
+repo_root=$(cd "$repo_root" && pwd -P)
+current_root=$(pwd -P)
+[ "$current_root" = "$repo_root" ] || fail "run from repository root: ${repo_root}"
+
+base_branch=main
+current_branch=$(git branch --show-current)
+[ "$current_branch" = "$base_branch" ] || fail "current branch must be ${base_branch}, got ${current_branch:-detached}"
+git rev-parse --verify --quiet "refs/heads/${base_branch}" >/dev/null || fail "missing local ${base_branch} branch"
+[ -z "$(git status --porcelain)" ] || fail 'main worktree is not clean'
+base_commit=$(git rev-parse "$base_branch")
+
+task_file=$(find_task_file "$task_id")
+task_status=$(read_field '- Status' "$task_file")
+derived_ready=0
+task_already_done=0
+case "$task_status" in
+  ready) ;;
+  blocked)
+    [ "$allow_derived_ready" -eq 1 ] || fail "${task_id} status must be ready, got blocked"
+    task_allows_file "$task_file" "$task_file" || fail "derived-ready requires ${task_file} in its own Allowed Files"
+    derived_ready=1
+    ;;
+  done)
+    [ "$resume_existing" -eq 1 ] || fail "${task_id} status must be ready, got done"
+    task_already_done=1
+    ;;
+  *) fail "${task_id} status must be ready, got ${task_status:-missing}" ;;
+esac
+
+if [ "$task_already_done" -eq 0 ]; then
+  depends_line=$(sed -n 's/^- Depends on: //p' "$task_file" | head -1)
+  dependencies=$(printf '%s\n' "$depends_line" | rg -o '[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+' 2>/dev/null || true)
+  while IFS= read -r dependency_id; do
+    [ -n "$dependency_id" ] || continue
+    dependency_file=$(find_task_file "$dependency_id")
+    dependency_status=$(read_field '- Status' "$dependency_file")
+    [ "$dependency_status" = done ] || fail "dependency ${dependency_id} must be done, got ${dependency_status:-missing}"
+  done <<EOF
+$dependencies
+EOF
+fi
+
+refer_fingerprint=
+
+case "$task_id" in
+  PROTO-*|MCP-*|DOC-*) workers=1 ;;
+  BE-*|FE-*|ACT-*) workers=2 ;;
+  *) fail "no worker-count rule for ${task_id}" ;;
+esac
+
+goal=$(task_goal "$task_file")
+[ -n "$goal" ] || fail "missing Goal content in ${task_file}"
+
+slug=$(printf '%s' "$task_id" | tr '[:upper:]_' '[:lower:]-')
+branch="codex/qs-${slug}"
+session="qs-${slug}"
+worktree_root=${OMX_TASK_WORKTREE_ROOT:-"$(dirname "$repo_root")/$(basename "$repo_root")-task-worktrees"}
+worktree="${worktree_root}/${slug}"
+launch_state_file="${worktree}/.omx/context/${slug}-launch.json"
+minimum_free_kib=${OMX_MIN_FREE_KIB:-20971520}
+[[ "$minimum_free_kib" =~ ^[0-9]+$ ]] || fail 'OMX_MIN_FREE_KIB must be a non-negative integer'
+start_timeout=${OMX_START_TIMEOUT_SECONDS:-180}
+[[ "$start_timeout" =~ ^[1-9][0-9]*$ ]] || fail 'OMX_START_TIMEOUT_SECONDS must be a positive integer'
+[ "$start_timeout" -le 300 ] || fail 'OMX_START_TIMEOUT_SECONDS must not exceed 300'
+
+if [ "$task_already_done" -eq 1 ]; then
+  if git show-ref --verify --quiet "refs/heads/${branch}" || [ -e "$worktree" ] || "$tmux_bin" has-session -t "$session" 2>/dev/null; then
+    fail "${task_id} is done on main but lifecycle resources remain; finish or inspect them before skipping"
+  fi
+  printf 'mode=already-finished\n'
+  printf 'task_id=%s\n' "$task_id"
+  printf 'task_file=%s\n' "$task_file"
+  printf 'main_after=%s\n' "$base_commit"
+  printf 'result=Task is already merged and cleaned\n'
+  exit 0
+fi
+
+created_worktree=0
+tmux_started=0
+leader_pane=
+lock_acquired=0
+print_summary() {
+  mode=$1
+  printf 'mode=%s\n' "$mode"
+  printf 'task_id=%s\n' "$task_id"
+  printf 'task_file=%s\n' "$task_file"
+  printf 'workers=%s\n' "$workers"
+  printf 'base_commit=%s\n' "$base_commit"
+  printf 'derived_ready=%s\n' "$([ "$derived_ready" -eq 1 ] && printf true || printf false)"
+  printf 'refer_fingerprint_version=%s\n' "$refer_fingerprint_version"
+  printf 'refer_fingerprint=%s\n' "$refer_fingerprint"
+  printf 'branch=%s\n' "$branch"
+  printf 'worktree=%s\n' "$worktree"
+  printf 'tmux_session=%s\n' "$session"
+  [ -z "$leader_pane" ] || printf 'leader_pane=%s\n' "$leader_pane"
+}
+git_common_dir=$(git rev-parse --git-common-dir)
+case "$git_common_dir" in
+  /*) ;;
+  *) git_common_dir="${repo_root}/${git_common_dir}" ;;
+esac
+launch_lock="${git_common_dir}/start-omx-task.lock"
+cleanup_partial_launch() {
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ "$created_worktree" -eq 1 ] && [ "$tmux_started" -eq 0 ]; then
+    git worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    git branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+  if [ "$lock_acquired" -eq 1 ]; then
+    rmdir "$launch_lock" >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+trap cleanup_partial_launch EXIT
+if ! mkdir "$launch_lock" 2>/dev/null; then
+  fail "another start-omx-task preflight is active or stale: ${launch_lock}"
+fi
+lock_acquired=1
+
+if [ "$resume_existing" -eq 1 ] && {
+  git show-ref --verify --quiet "refs/heads/${branch}" ||
+    [ -e "$worktree" ] ||
+    "$tmux_bin" has-session -t "$session" 2>/dev/null
+}; then
+  git show-ref --verify --quiet "refs/heads/${branch}" || fail "incomplete existing Task state: missing branch ${branch}"
+  [ -d "$worktree" ] || fail "incomplete existing Task state: missing worktree ${worktree}"
+  "$tmux_bin" has-session -t "$session" 2>/dev/null || fail "incomplete existing Task state: missing tmux session ${session}"
+  [ -f "$launch_state_file" ] || fail "incomplete existing Task state: missing launch state ${launch_state_file}"
+  worktree=$(cd "$worktree" && pwd -P)
+  launch_state_file="${worktree}/.omx/context/${slug}-launch.json"
+  [ "$(git -C "$worktree" branch --show-current)" = "$branch" ] || fail "existing worktree is not on ${branch}"
+  [ "$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] || \
+    fail 'existing worktree does not share the main Git repository'
+
+  launch_values=$(python3 - "$launch_state_file" "$task_id" "$task_file" "$branch" "$worktree" "$session" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path, task_id, task_file, branch, worktree, session = sys.argv[1:]
+data = json.loads(Path(path).read_text())
+expected = {
+    "task_id": task_id,
+    "task_file": task_file,
+    "branch": branch,
+    "worktree": str(Path(worktree).resolve()),
+    "session": session,
+}
+actual = dict(data)
+actual["worktree"] = str(Path(str(data.get("worktree", ""))).resolve())
+for key, value in expected.items():
+    if actual.get(key) != value:
+        raise SystemExit(f"launch state mismatch: {key}")
+base_commit = str(data.get("base_commit", ""))
+fingerprint = str(data.get("refer_fingerprint", ""))
+fingerprint_version = str(data.get("refer_fingerprint_version", "legacy-metadata-v1"))
+derived = data.get("derived_ready")
+team_name = str(data.get("team_name", ""))
+if not re.fullmatch(r"[0-9a-f]{40}", base_commit):
+    raise SystemExit("launch state has no valid base commit")
+if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    raise SystemExit("launch state has no valid refer fingerprint")
+if fingerprint_version not in {"legacy-metadata-v1", "content-v2"}:
+    raise SystemExit("launch state has invalid refer fingerprint version")
+if not isinstance(derived, bool):
+    raise SystemExit("launch state has no derived-ready flag")
+if team_name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", team_name):
+    raise SystemExit("launch state has invalid team name")
+print("\x1f".join([
+    base_commit,
+    "true" if derived else "false",
+    fingerprint_version,
+    fingerprint,
+    team_name,
+]))
+PY
+) || fail 'invalid existing launch state'
+  IFS=$'\x1f' read -r base_commit derived_value refer_fingerprint_version refer_fingerprint recorded_team <<EOF
+$launch_values
+EOF
+  [ "$derived_value" = true ] && derived_ready=1 || derived_ready=0
+  git cat-file -e "${base_commit}^{commit}" 2>/dev/null || fail "launch base commit is missing: ${base_commit}"
+
+  shopt -s nullglob
+  config_files=("${worktree}"/.omx/state/team/*/config.json)
+  shopt -u nullglob
+  [ "${#config_files[@]}" -eq 1 ] || fail "expected one existing OMX team, found ${#config_files[@]}"
+  team_name=$(basename "$(dirname "${config_files[0]}")")
+  [ -z "$recorded_team" ] || [ "$recorded_team" = "$team_name" ] || fail 'launch state team does not match existing OMX team'
+
+  status_json=$(cd "$worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$worktree" "$omx_bin" team status "$team_name" --json 2>/dev/null) || \
+    fail "could not read existing team status: ${team_name}"
+  team_recovery_state=$(printf '%s' "$status_json" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+if payload.get("status") != "ok":
+    raise SystemExit(1)
+tasks = payload.get("tasks") or {}
+workers = payload.get("workers") or {}
+total = tasks.get("total", 0)
+terminal_complete = (
+    payload.get("phase") == "complete"
+    and isinstance(total, int)
+    and total > 0
+    and tasks.get("completed") == total
+    and all(tasks.get(key, 0) == 0 for key in ("pending", "blocked", "in_progress", "failed"))
+    and all(workers.get(key, 0) == 0 for key in ("dead", "non_reporting"))
+)
+print("terminal-complete" if terminal_complete else "active")
+') || fail "existing team state is not usable: ${team_name}"
+
+  recovery_note=
+  pane_rows=$("$tmux_bin" list-panes -a -F '#{pane_id}|#{session_name}|#{pane_dead}|#{pane_current_path}|#{pane_start_command}' 2>/dev/null) || \
+    fail "could not inspect existing tmux session: ${session}"
+  candidates=$(printf '%s\n' "$pane_rows" | awk -F '|' -v session="$session" -v worktree="$worktree" '$2 == session && $3 == "0" && $4 == worktree && $5 !~ /hud --watch/ && $5 !~ /OMX_TMUX_HUD_OWNER/ { print $1 }')
+  candidate_count=$(printf '%s\n' "$candidates" | awk 'NF { count += 1 } END { print count + 0 }')
+  [ "$candidate_count" -le 1 ] || fail "multiple live exact-cwd leader panes in ${session}"
+  if [ "$candidate_count" -eq 0 ]; then
+    [ "$team_recovery_state" = terminal-complete ] || fail "no live exact-cwd leader pane in ${session}"
+    "$tmux_bin" new-window -d -P -F '#{pane_id}' -t "$session" -c "$worktree" >/dev/null || \
+      fail "could not recreate terminal leader pane in ${session}"
+    pane_rows=$("$tmux_bin" list-panes -a -F '#{pane_id}|#{session_name}|#{pane_dead}|#{pane_current_path}|#{pane_start_command}' 2>/dev/null) || \
+      fail "could not inspect recreated terminal leader pane in ${session}"
+    candidates=$(printf '%s\n' "$pane_rows" | awk -F '|' -v session="$session" -v worktree="$worktree" '$2 == session && $3 == "0" && $4 == worktree && $5 !~ /hud --watch/ && $5 !~ /OMX_TMUX_HUD_OWNER/ { print $1 }')
+    candidate_count=$(printf '%s\n' "$candidates" | awk 'NF { count += 1 } END { print count + 0 }')
+    [ "$candidate_count" -eq 1 ] || fail "terminal leader pane recovery is ambiguous in ${session}"
+    recovery_note='terminal leader pane recreated'
+  fi
+  leader_pane=$candidates
+
+  python3 - "$launch_state_file" "$team_name" "$leader_pane" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["team_name"] = sys.argv[2]
+data["leader_pane"] = sys.argv[3]
+path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+PY
+  rmdir "$launch_lock"
+  lock_acquired=0
+  trap - EXIT
+  print_summary resumed
+  printf 'team_name=%s\n' "$team_name"
+  [ -z "$recovery_note" ] || printf 'recovery=%s\n' "$recovery_note"
+  printf 'result=existing Task runtime recovered\n'
+  exit 0
+fi
+
+refer_fingerprint=$(reference_fingerprint "$repo_root/refer")
+available_kib=$("$df_bin" -Pk "$repo_root" | awk 'NR == 2 { print $4 }')
+[[ "$available_kib" =~ ^[0-9]+$ ]] || fail 'could not determine available disk space'
+[ "$available_kib" -ge "$minimum_free_kib" ] || fail "insufficient disk: ${available_kib} KiB available, ${minimum_free_kib} KiB required"
+
+git show-ref --verify --quiet "refs/heads/${branch}" && fail "branch already exists: ${branch}"
+[ ! -e "$worktree" ] || fail "worktree path already exists: ${worktree}"
+if "$tmux_bin" has-session -t "$session" 2>/dev/null; then
+  fail "tmux session already exists: ${session}"
+fi
+active_task_sessions=$("$tmux_bin" list-sessions -F '#{session_name}' 2>/dev/null | awk '/^qs-/ { count += 1 } END { print count + 0 }' || true)
+active_task_sessions=${active_task_sessions:-0}
+[ "$active_task_sessions" -lt 2 ] || fail "host already has ${active_task_sessions} qs-* tmux sessions; maximum is 2"
+
+"$omx_bin" doctor --team >/dev/null
+"$tmux_bin" -V >/dev/null
+
+team_task="Execute ${task_id} from ${task_file} as one atomic delivery with committed worker evidence held READY_FOR_LEADER_REVIEW until leader approval"
+derived_instruction=
+if [ "$derived_ready" -eq 1 ]; then
+  derived_instruction=" The main branch still records blocked only because all named dependencies have just become done; commit the legal Task status transition from blocked to ready before any other Task write."
+fi
+prompt="${task_id}: act as the persistent Codex leader for exactly this one repository Task. Authoritative task file: ${task_file}. Desired outcome: ${goal}. Stay inside this Task integration worktree and do not exit after spawning workers. First read root AGENTS.md, docs/glossary.md, docs/product/capability-map.md, docs/architecture/system-context.md, docs/tasks/README.md, the Task file, and nearest target AGENTS.md or README.md. Verify every dependency done.${derived_instruction} Then invoke the team skill through the exact atomic command: omx team ${workers}:executor \"${team_task}\". Do not add semicolons, bullets, or extra clauses to that team task string. After startup inspect the runtime tasks and send non-overlapping assignments through team state or mailbox. Every worker must commit with the Lore protocol, report READY_FOR_LEADER_REVIEW, and keep its runtime task in_progress until you approve. Continuously use cwd-bound omx team status and await so runtime integration lands worker commits on the Task branch. Review the exact integrated HEAD independently, run every Task Verification Command plus local AGENTS or README checks, git diff --check, link or contract checks, and git status. PostgreSQL tasks require guarded PostgreSQL evidence and never SQLite. If verification fails, send concrete fixes and keep monitoring. Only after acceptance and all verification pass may you send APPROVED so workers transition terminal, mark the repository Task done, and change existing Acceptance Criteria markers from unchecked to checked without editing their text, order, or count. Write the final evidence report to exactly .omx/context/${slug}-final-evidence.md, containing exactly one canonical bullet of the form '- Final HEAD: <full 40-character commit SHA in backticks>'. Never modify refer/, credentials, logs, runtime data, sibling tasks, or another domain. Do not shut down the team after success; leave terminal team state and this Codex leader session available for operator inspection because the operator will run ./scripts/finish-omx-task ${task_id} from clean main to verify, shut down, rebase, merge, and clean resources."
+
+if [ "$dry_run" -eq 1 ]; then
+  print_summary dry-run
+  printf 'launch=persistent Codex leader -> omx team %s:executor <atomic-task>\n' "$workers"
+  printf 'result=no resources created\n'
+  rmdir "$launch_lock"
+  lock_acquired=0
+  trap - EXIT
+  exit 0
+fi
+
+mkdir -p "$worktree_root"
+git worktree add "$worktree" -b "$branch" "$base_branch" >/dev/null
+created_worktree=1
+git -C "$worktree" check-ignore -q .omx/context/launcher-probe || \
+  fail '.omx runtime context is not ignored; refusing to dirty the Task worktree'
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+context_dir="${worktree}/.omx/context"
+context_file="${context_dir}/${slug}-${stamp}.md"
+prompt_file="${context_dir}/${slug}-${stamp}.prompt.txt"
+status_file="${context_dir}/${slug}-${stamp}.startup-status.json"
+mkdir -p "$context_dir"
+{
+  printf '# %s OMX Team context\n\n' "$task_id"
+  printf -- '- Task file: `%s`\n' "$task_file"
+  printf -- '- Branch: `%s`\n' "$branch"
+  printf -- '- Base commit: `%s`\n' "$base_commit"
+  printf -- '- Workers: `%s:executor`\n' "$workers"
+  printf -- '- Desired outcome: %s\n' "$goal"
+  printf -- '- Constraints: Allowed Files only; refer/ read-only; dependencies already done.\n'
+} > "$context_file"
+printf '%s\n' "$prompt" > "$prompt_file"
+python3 - "$launch_state_file" "$task_id" "$task_file" "$base_commit" "$branch" "$worktree" "$session" "$derived_ready" "$refer_fingerprint_version" "$refer_fingerprint" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+payload = {
+    "task_id": sys.argv[2],
+    "task_file": sys.argv[3],
+    "base_commit": sys.argv[4],
+    "branch": sys.argv[5],
+    "worktree": sys.argv[6],
+    "session": sys.argv[7],
+    "derived_ready": sys.argv[8] == "1",
+    "refer_fingerprint_version": sys.argv[9],
+    "refer_fingerprint": sys.argv[10],
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+
+printf -v leader_command '%q ' \
+  env "OMX_ROOT=${worktree}" OMX_AUTO_UPDATE=0 "$omx_bin" exec \
+  --dangerously-bypass-approvals-and-sandbox "$prompt"
+leader_command=${leader_command% }
+if ! leader_pane=$("$tmux_bin" new-session -d -P -F '#{pane_id}' \
+  -s "$session" -c "$worktree" "$leader_command"); then
+  if "$tmux_bin" has-session -t "$session" 2>/dev/null; then
+    tmux_started=1
+    fail "tmux session ${session} exists but its launch command returned an error; inspect it before recovery"
+  fi
+  fail "could not create tmux session: ${session}"
+fi
+tmux_started=1
+[[ "$leader_pane" =~ ^%[0-9]+$ ]] || fail "tmux did not return a valid leader pane id: ${leader_pane:-missing}"
+
+leader_pane_alive() {
+  pane_dead=$("$tmux_bin" display-message -p -t "$leader_pane" '#{pane_dead}' 2>/dev/null) || return 1
+  [ "$pane_dead" = 0 ]
+}
+
+team_name=
+status_json=
+for (( second = 0; second < start_timeout; second += 1 )); do
+  shopt -s nullglob
+  config_files=("${worktree}"/.omx/state/team/*/config.json)
+  shopt -u nullglob
+  if [ "${#config_files[@]}" -gt 1 ]; then
+    fail "multiple OMX teams appeared in ${worktree}; inspect ${session} before recovery"
+  fi
+  if [ "${#config_files[@]}" -eq 1 ]; then
+    candidate_dir=$(dirname "${config_files[0]}")
+    candidate_name=$(basename "$candidate_dir")
+    if [[ "$candidate_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+      status_json=$(cd "$worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$worktree" \
+        "$omx_bin" team status "$candidate_name" --json 2>/dev/null) || status_json=
+      if printf '%s' "$status_json" | python3 -c '
+import json
+import sys
+
+expected_workers = int(sys.argv[1])
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, ValueError):
+    raise SystemExit(1)
+
+workers = payload.get("workers", {})
+tasks = payload.get("tasks", {})
+ready = (
+    payload.get("status") == "ok"
+    and workers.get("total") == expected_workers
+    and workers.get("dead") == 0
+    and workers.get("non_reporting") == 0
+    and isinstance(tasks.get("total"), int)
+    and tasks.get("total") >= 1
+)
+raise SystemExit(0 if ready else 1)
+' "$workers"; then
+        if ! leader_pane_alive; then
+          fail "persistent Codex leader exited after OMX team state appeared; inspect ${worktree} before recovery"
+        fi
+        team_name=$candidate_name
+        break
+      fi
+    fi
+  fi
+  if ! leader_pane_alive; then
+    if [ "${#config_files[@]}" -eq 0 ]; then
+      if "$tmux_bin" has-session -t "$session" 2>/dev/null; then
+        fail "persistent Codex leader pane exited before OMX team state appeared while ${session} still has panes; inspect it before recovery"
+      fi
+      tmux_started=0
+      fail "persistent Codex leader exited before creating OMX team state"
+    fi
+    fail "persistent Codex leader exited after OMX team state appeared; inspect ${worktree} before recovery"
+  fi
+  sleep 1
+done
+
+if [ -z "$team_name" ]; then
+  printf 'ERROR: persistent Codex leader did not produce a ready OMX team within %s seconds\n' "$start_timeout" >&2
+  print_summary recovery-required >&2
+  printf 'leader_prompt=%s\n' "$prompt_file" >&2
+  printf 'inspect=tmux attach -t %s\n' "$session" >&2
+  exit 1
+fi
+
+printf '%s\n' "$status_json" > "$status_file"
+python3 - "$launch_state_file" "$team_name" "$leader_pane" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["team_name"] = sys.argv[2]
+data["leader_pane"] = sys.argv[3]
+path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+PY
+rmdir "$launch_lock"
+lock_acquired=0
+trap - EXIT
+print_summary started
+printf 'team_name=%s\n' "$team_name"
+printf 'context=%s\n' "$context_file"
+printf 'leader_prompt=%s\n' "$prompt_file"
+printf 'startup_status=%s\n' "$status_file"
+printf '\nMonitor:\n'
+printf '(cd %q && OMX_AUTO_UPDATE=0 OMX_ROOT=%q omx team status %q --json)\n' "$worktree" "$worktree" "$team_name"
+printf '(cd %q && OMX_AUTO_UPDATE=0 OMX_ROOT=%q omx team await %q --timeout-ms 30000 --json)\n' "$worktree" "$worktree" "$team_name"
+printf 'tmux attach -t %q\n' "$session"
+printf '\nFinish only after terminal team status and leader final evidence:\n'
+printf 'finish=./scripts/finish-omx-task %q\n' "$task_id"

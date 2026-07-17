@@ -1,0 +1,807 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+active_task=
+active_task_file=
+active_branch=
+active_worktree=
+active_session=
+active_leader_pane=
+active_team=
+lock_dir=
+lock_acquired=0
+state_dir=
+state_file=
+verification_file=
+verification_runs=0
+resumed=false
+refer_drift_reported=0
+
+state_phase=
+state_authority_main=
+state_approved_head=
+state_approved_tree=
+state_team=
+state_leader_pane=
+state_refer_fingerprint=
+state_refer_fingerprint_version=
+state_integration_main=
+state_rebased_head=
+state_merged_head=
+state_verification_runs=0
+
+print_recovery() {
+  [ -n "$active_task" ] || return 0
+  printf 'recovery_task=%s\n' "$active_task" >&2
+  printf 'recovery_task_file=%s\n' "${active_task_file:-unknown}" >&2
+  printf 'recovery_branch=%s\n' "${active_branch:-unknown}" >&2
+  printf 'recovery_worktree=%s\n' "${active_worktree:-unknown}" >&2
+  printf 'recovery_tmux_session=%s\n' "${active_session:-unknown}" >&2
+  printf 'recovery_leader_pane=%s\n' "${active_leader_pane:-unknown}" >&2
+  printf 'recovery_team=%s\n' "${active_team:-unknown}" >&2
+  printf 'recovery_state=%s\n' "${state_file:-unknown}" >&2
+  printf 'recovery_command=./scripts/finish-omx-task %s\n' "$active_task" >&2
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  print_recovery
+  exit 1
+}
+
+cleanup() {
+  rc=$?
+  if [ -n "$verification_file" ] && [ -e "$verification_file" ]; then
+    rm -f "$verification_file"
+  fi
+  if [ "$lock_acquired" -eq 1 ]; then
+    rmdir "$lock_dir" >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+usage() {
+  printf '%s\n' \
+    'Usage: ./scripts/finish-omx-task <TASK_ID>' \
+    '' \
+    'Verify, stop, rebase, ff-only merge, and clean one completed OMX Task.' \
+    'Rerun the same command after repairing any preserved recovery state.'
+}
+
+read_field() {
+  field=$1
+  file=$2
+  awk -v field="$field" '
+    index($0, field ": ") == 1 {
+      line = $0
+      sub(/^[^:]+: /, "", line)
+      gsub(/`/, "", line)
+      print line
+      exit
+    }
+  ' "$file"
+}
+
+find_task_file() {
+  wanted_id=$1
+  matches=$(rg -l --glob '*.md' -- "^# ${wanted_id}( |$)" docs/tasks 2>/dev/null || true)
+  count=$(printf '%s\n' "$matches" | awk 'NF { count += 1 } END { print count + 0 }')
+  [ "$count" -eq 1 ] || fail "expected one task file for ${wanted_id}, found ${count}"
+  printf '%s\n' "$matches"
+}
+
+task_allows_file() {
+  wanted=$1
+  file=$2
+  allowed=$(awk '
+    /^## Allowed Files[[:space:]]*$/ { in_allowed = 1; next }
+    in_allowed && /^## / { exit }
+    in_allowed { print }
+  ' "$file")
+  printf '%s\n' "$allowed" | rg -F -x -- "- \`${wanted}\`" >/dev/null
+}
+
+validate_dependencies_done() {
+  file=$1
+  depends_line=$(sed -n 's/^- Depends on: //p' "$file" | head -1)
+  dependencies=$(printf '%s\n' "$depends_line" | rg -o '[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+' 2>/dev/null || true)
+  while IFS= read -r dependency_id; do
+    [ -n "$dependency_id" ] || continue
+    dependency_file=$(find_task_file "$dependency_id")
+    dependency_status=$(read_field '- Status' "$dependency_file")
+    [ "$dependency_status" = done ] || fail "dependency ${dependency_id} must be done, got ${dependency_status:-missing}"
+  done <<EOF
+$dependencies
+EOF
+}
+
+reference_fingerprint() {
+  python3 - "$1" "$2" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+version = sys.argv[2]
+digest = hashlib.sha256()
+if version == "legacy-metadata-v1":
+    if not root.exists():
+        digest.update(b"absent\n")
+    else:
+        for current, dirs, files in os.walk(root):
+            dirs.sort()
+            files.sort()
+            current_path = Path(current)
+            for name in dirs + files:
+                path = current_path / name
+                info = os.lstat(path)
+                relative = path.relative_to(root).as_posix()
+                target = os.readlink(path) if stat.S_ISLNK(info.st_mode) else ""
+                digest.update(
+                    f"{relative}\0{info.st_mode}\0{info.st_size}\0{info.st_mtime_ns}\0{target}\n".encode()
+                )
+elif version == "content-v2":
+    digest.update(b"content-v2\n")
+    if not root.exists():
+        digest.update(b"absent\n")
+    else:
+        for current, dirs, files in os.walk(root):
+            dirs[:] = sorted(name for name in dirs if name not in {".git", ".omx"})
+            files = sorted(name for name in files if name != ".DS_Store")
+            current_path = Path(current)
+            for name in dirs + files:
+                path = current_path / name
+                info = os.lstat(path)
+                relative = path.relative_to(root).as_posix()
+                mode = stat.S_IMODE(info.st_mode)
+                if stat.S_ISLNK(info.st_mode):
+                    record = f"link\0{relative}\0{mode:o}\0{os.readlink(path)}\n".encode()
+                elif stat.S_ISREG(info.st_mode):
+                    content = hashlib.sha256(path.read_bytes()).hexdigest()
+                    record = f"file\0{relative}\0{mode:o}\0{content}\n".encode()
+                elif stat.S_ISDIR(info.st_mode):
+                    record = f"dir\0{relative}\0{mode:o}\n".encode()
+                else:
+                    record = f"special\0{relative}\0{info.st_mode}\n".encode()
+                digest.update(record)
+else:
+    raise SystemExit(f"unsupported refer fingerprint version: {version}")
+print(digest.hexdigest())
+PY
+}
+
+observe_reference_drift() {
+  current=$(reference_fingerprint "$repo_root/refer" "$state_refer_fingerprint_version")
+  if [ "$current" != "$state_refer_fingerprint" ] && [ "$refer_drift_reported" -eq 0 ]; then
+    printf 'WARNING: external refer/ drift detected: launch=%s current=%s; Task branch refer protections remain enforced\n' \
+      "$state_refer_fingerprint" "$current" >&2
+    refer_drift_reported=1
+  fi
+}
+
+validate_terminal_status() {
+  python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+    tasks = payload["tasks"]
+    workers = payload["workers"]
+    valid = (
+        payload.get("status") == "ok"
+        and payload.get("phase") == "complete"
+        and isinstance(tasks.get("total"), int)
+        and tasks["total"] > 0
+        and tasks.get("completed") == tasks["total"]
+        and all(tasks.get(key) == 0 for key in (
+            "pending", "blocked", "in_progress", "failed"
+        ))
+        and workers.get("dead") == 0
+        and workers.get("non_reporting") == 0
+    )
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    valid = False
+raise SystemExit(0 if valid else 1)
+'
+}
+
+resolve_leader_pane() {
+  configured_pane=$1
+  session=$2
+  worktree=$3
+  resolved_leader_pane=
+
+  set +e
+  pane_rows=$("$tmux_bin" list-panes -a -F '#{pane_id}|#{session_name}|#{pane_dead}|#{pane_current_path}|#{pane_start_command}' 2>/dev/null)
+  list_rc=$?
+  set -e
+  [ "$list_rc" -eq 0 ] || fail "could not inspect Task tmux session: ${session}"
+  candidates=$(printf '%s\n' "$pane_rows" | awk -F '|' -v session="$session" -v worktree="$worktree" '$2 == session && $3 == "0" && $4 == worktree && $5 !~ /hud --watch/ && $5 !~ /OMX_TMUX_HUD_OWNER/ { print $1 }')
+  candidate_count=$(printf '%s\n' "$candidates" | awk 'NF { count += 1 } END { print count + 0 }')
+  if printf '%s\n' "$candidates" | rg -F -x -- "$configured_pane" >/dev/null; then
+    resolved_leader_pane=$configured_pane
+    return 0
+  fi
+  [ "$candidate_count" -ne 0 ] || fail "no live exact-cwd leader pane in ${session}"
+  [ "$candidate_count" -eq 1 ] || fail "multiple live exact-cwd leader panes in ${session}"
+  resolved_leader_pane=$candidates
+  if [ "$resolved_leader_pane" != "$configured_pane" ]; then
+    printf 'leader_pane_recovered=old:%s,new:%s\n' "$configured_pane" "$resolved_leader_pane"
+  fi
+}
+
+state_write() {
+  phase=$1
+  state_phase=$phase
+  python3 - "$state_file" "$active_task" "$active_task_file" "$state_phase" \
+    "$state_authority_main" "$state_approved_head" "$state_approved_tree" \
+    "$state_team" "$state_leader_pane" "$state_refer_fingerprint" "$state_refer_fingerprint_version" \
+    "$state_integration_main" "$state_rebased_head" "$state_merged_head" \
+    "$state_verification_runs" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+payload = {
+    "version": 1,
+    "task_id": sys.argv[2],
+    "task_file": sys.argv[3],
+    "phase": sys.argv[4],
+    "authority_main": sys.argv[5],
+    "approved_head": sys.argv[6],
+    "approved_tree": sys.argv[7],
+    "team": sys.argv[8],
+    "leader_pane": sys.argv[9],
+    "refer_fingerprint": sys.argv[10],
+    "refer_fingerprint_version": sys.argv[11],
+    "integration_main": sys.argv[12] or None,
+    "rebased_head": sys.argv[13] or None,
+    "merged_head": sys.argv[14] or None,
+    "verification_runs": int(sys.argv[15]),
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
+temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+os.replace(temporary, path)
+PY
+}
+
+state_load() {
+  state_values=$(python3 - "$state_file" "$active_task" "$active_task_file" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path, task_id, task_file = sys.argv[1:]
+data = json.loads(Path(path).read_text())
+if data.get("version") != 1 or data.get("task_id") != task_id or data.get("task_file") != task_file:
+    raise SystemExit("finish state ownership mismatch")
+phase = data.get("phase")
+if phase not in {"shutdown", "session-stopped", "rebased", "merged", "verified"}:
+    raise SystemExit("invalid finish state phase")
+hash_keys = ["authority_main", "approved_head", "approved_tree"]
+for key in hash_keys:
+    if not re.fullmatch(r"[0-9a-f]{40}", str(data.get(key, ""))):
+        raise SystemExit(f"invalid finish state {key}")
+for key in ["integration_main", "rebased_head", "merged_head"]:
+    value = data.get(key) or ""
+    if value and not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise SystemExit(f"invalid finish state {key}")
+if not re.fullmatch(r"[0-9a-f]{64}", str(data.get("refer_fingerprint", ""))):
+    raise SystemExit("invalid finish state refer fingerprint")
+fingerprint_version = data.get("refer_fingerprint_version", "legacy-metadata-v1")
+if fingerprint_version not in {"legacy-metadata-v1", "content-v2"}:
+    raise SystemExit("invalid finish state refer fingerprint version")
+if not re.fullmatch(r"%[0-9]+", str(data.get("leader_pane", ""))):
+    raise SystemExit("invalid finish state leader pane")
+runs = data.get("verification_runs")
+if not isinstance(runs, int) or runs < 1 or runs > 3:
+    raise SystemExit("invalid finish state verification count")
+values = [
+    phase,
+    data["authority_main"],
+    data["approved_head"],
+    data["approved_tree"],
+    str(data.get("team", "")),
+    data["leader_pane"],
+    data["refer_fingerprint"],
+    fingerprint_version,
+    str(data.get("integration_main") or ""),
+    str(data.get("rebased_head") or ""),
+    str(data.get("merged_head") or ""),
+    str(runs),
+]
+print("\x1f".join(values))
+PY
+) || fail 'invalid resumable finish state'
+  IFS=$'\x1f' read -r state_phase state_authority_main state_approved_head state_approved_tree \
+    state_team state_leader_pane state_refer_fingerprint state_refer_fingerprint_version state_integration_main \
+    state_rebased_head state_merged_head state_verification_runs <<EOF
+$state_values
+EOF
+  active_team=$state_team
+  active_leader_pane=$state_leader_pane
+  verification_runs=$state_verification_runs
+  resumed=true
+}
+
+load_launch_state() {
+  launch_state_file="${active_worktree}/.omx/context/${slug}-launch.json"
+  [ -f "$launch_state_file" ] || fail "missing launch state: ${launch_state_file}"
+  launch_values=$(python3 - "$launch_state_file" "$active_task" "$active_task_file" "$active_branch" "$active_worktree" "$active_session" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path, task_id, task_file, branch, worktree, session = sys.argv[1:]
+data = json.loads(Path(path).read_text())
+expected = {
+    "task_id": task_id,
+    "task_file": task_file,
+    "branch": branch,
+    "worktree": str(Path(worktree).resolve()),
+    "session": session,
+}
+actual = dict(data)
+actual["worktree"] = str(Path(str(data.get("worktree", ""))).resolve())
+for key, value in expected.items():
+    if actual.get(key) != value:
+        raise SystemExit(f"launch state mismatch: {key}")
+fingerprint = data.get("refer_fingerprint", "")
+if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    raise SystemExit("launch state has no refer fingerprint")
+fingerprint_version = data.get("refer_fingerprint_version", "legacy-metadata-v1")
+if fingerprint_version not in {"legacy-metadata-v1", "content-v2"}:
+    raise SystemExit("launch state has invalid refer fingerprint version")
+derived = data.get("derived_ready")
+if not isinstance(derived, bool):
+    raise SystemExit("launch state has no derived-ready flag")
+print(("true" if derived else "false") + "\x1f" + fingerprint_version + "\x1f" + fingerprint)
+PY
+) || fail 'invalid launch state'
+  IFS=$'\x1f' read -r launch_derived_ready state_refer_fingerprint_version state_refer_fingerprint <<EOF
+$launch_values
+EOF
+}
+
+scope_and_document_checks() {
+  location=$1
+  target_ref=$2
+  base_ref=$3
+  python3 - "$repo_root" "$location" "$base_ref" "$target_ref" "$active_task_file" <<'PY'
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+repo, location, base, target, task_file = sys.argv[1:]
+
+def git(cwd, *args):
+    return subprocess.check_output(["git", "-C", cwd, *args], text=True)
+
+base_doc = git(repo, "show", f"{base}:{task_file}")
+current_path = Path(location, task_file)
+if not current_path.is_file():
+    raise SystemExit(f"Task file missing: {task_file}")
+current_doc = current_path.read_text()
+
+status_pattern = re.compile(r"^- Status: `([^`]+)`$", re.M)
+base_status = status_pattern.search(base_doc)
+current_status = status_pattern.search(current_doc)
+if not base_status or not current_status or current_status.group(1) != "done":
+    raise SystemExit("Task file is not done")
+normalized = status_pattern.sub(base_status.group(0), current_doc, count=1)
+
+def is_controlled_task_lifecycle_change(base_text, current_text):
+    base_lines = base_text.splitlines(keepends=True)
+    current_lines = current_text.splitlines(keepends=True)
+    if len(base_lines) != len(current_lines):
+        return False
+    section = None
+    for base_line, current_line in zip(base_lines, current_lines):
+        if base_line.startswith("## "):
+            section = base_line[3:].strip()
+        if base_line == current_line:
+            continue
+        if section != "Acceptance Criteria":
+            return False
+        base_box = re.fullmatch(r"([ \t]*-[ \t]+)\[ \](.*?)(\r?\n)?", base_line)
+        current_box = re.fullmatch(r"([ \t]*-[ \t]+)\[[xX]\](.*?)(\r?\n)?", current_line)
+        if not base_box or not current_box or base_box.groups() != current_box.groups():
+            return False
+    return True
+
+if not is_controlled_task_lifecycle_change(base_doc, normalized):
+    raise SystemExit("Task file changed beyond controlled Status and Acceptance transitions")
+
+allowed_match = re.search(
+    r"^## Allowed Files\s*$\n(.*?)(?=^## |\Z)", base_doc, re.M | re.S
+)
+if not allowed_match:
+    raise SystemExit("Task file has no Allowed Files section")
+allowed = re.findall(r"^- `([^`]+)`$", allowed_match.group(1), re.M)
+if not allowed or len(allowed) != len(set(allowed)):
+    raise SystemExit("Allowed Files must be non-empty and unique")
+for pattern in allowed:
+    if pattern == "refer" or pattern.startswith("refer/"):
+        raise SystemExit("Allowed Files may not include protected refer/")
+    if pattern.startswith("/") or ".." in Path(pattern).parts:
+        raise SystemExit(f"unsafe Allowed Files entry: {pattern}")
+    if any(mark in pattern for mark in ("*", "?", "[", "]")) and not pattern.endswith("/**"):
+        raise SystemExit(f"unsupported Allowed Files pattern: {pattern}")
+
+changed = git(location, "diff", "--name-only", f"{base}...{target}").splitlines()
+protected = [path for path in changed if path == "refer" or path.startswith("refer/")]
+if protected:
+    raise SystemExit("branch changed protected refer/: " + ", ".join(protected))
+
+def permitted(path):
+    for pattern in allowed:
+        if pattern.endswith("/**"):
+            if path.startswith(pattern[:-3].rstrip("/") + "/"):
+                return True
+        elif path == pattern:
+            return True
+    return False
+
+outside = [path for path in changed if not permitted(path)]
+if outside:
+    raise SystemExit(
+        "branch changed files outside Allowed Files: " + ", ".join(outside)
+    )
+if task_file not in changed:
+    raise SystemExit("Task branch did not record its done Status transition")
+
+link_pattern = re.compile(r"(?<!!)\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)")
+for relative in changed:
+    if not relative.endswith(".md"):
+        continue
+    path = Path(location, relative)
+    if not path.is_file():
+        continue
+    for raw in link_pattern.findall(path.read_text()):
+        if "://" in raw or raw.startswith("#"):
+            continue
+        if not (path.parent / raw).resolve().exists():
+            raise SystemExit(f"missing Markdown link target: {relative}: {raw}")
+PY
+}
+
+load_verification_commands() {
+  base_ref=$1
+  python3 - "$repo_root" "$base_ref" "$active_task_file" "$verification_file" <<'PY'
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+repo, base, task_file, destination = sys.argv[1:]
+document = subprocess.check_output(
+    ["git", "-C", repo, "show", f"{base}:{task_file}"], text=True
+)
+tail = document.split("## Verification Commands", 1)
+if len(tail) != 2:
+    raise SystemExit("Task file has no Verification Commands section")
+blocks = re.findall(r"```(?:sh|bash)\n(.*?)\n```", tail[1], re.S)
+if len(blocks) != 1:
+    raise SystemExit(
+        f"expected one Verification Commands shell block, found {len(blocks)}"
+    )
+Path(destination).write_text(blocks[0] + "\n")
+PY
+}
+
+run_verification() {
+  stage=$1
+  location=$2
+  target_ref=$3
+  base_ref=$4
+  printf 'verification_stage=%s\n' "$stage"
+  [ -z "$(git -C "$location" status --porcelain)" ] || {
+    printf 'Task worktree is not clean\n' >&2
+    return 1
+  }
+  observe_reference_drift
+  scope_and_document_checks "$location" "$target_ref" "$base_ref" || return 1
+  git -C "$location" diff --check "${base_ref}...${target_ref}" || return 1
+  load_verification_commands "$base_ref" || return 1
+  head_before=$(git -C "$location" rev-parse HEAD) || return 1
+  set +e
+  (cd "$location" && bash -euo pipefail "$verification_file")
+  command_rc=$?
+  set -e
+  [ "$command_rc" -eq 0 ] || return 1
+  [ "$(git -C "$location" rev-parse HEAD)" = "$head_before" ] || {
+    printf 'Verification Commands changed Git HEAD\n' >&2
+    return 1
+  }
+  [ -z "$(git -C "$location" status --porcelain)" ] || {
+    printf 'Verification Commands left the repository dirty\n' >&2
+    return 1
+  }
+  observe_reference_drift
+  scope_and_document_checks "$location" HEAD "$base_ref" || return 1
+  verification_runs=$((verification_runs + 1))
+}
+
+compare_approved_content() {
+  python3 - "$active_worktree" "$state_authority_main" "$state_approved_head" <<'PY'
+import subprocess
+import sys
+
+worktree, base, approved = sys.argv[1:]
+
+def git(*args, check=True):
+    return subprocess.run(
+        ["git", "-C", worktree, *args], text=True, check=check,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+
+paths = git("diff", "--name-only", f"{base}...{approved}").stdout.splitlines()
+for path in paths:
+    before = git("show", f"{approved}:{path}", check=False)
+    after = git("show", f"HEAD:{path}", check=False)
+    if before.returncode != after.returncode or before.stdout != after.stdout:
+        raise SystemExit(f"rebased Task content changed from approved tree: {path}")
+PY
+}
+
+[ "$#" -eq 1 ] || { usage >&2; exit 2; }
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+
+active_task=$1
+[[ "$active_task" =~ ^[A-Z][A-Z0-9-]+$ ]] || fail "invalid TASK_ID: ${active_task}"
+
+for command_name in git rg bash find python3; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
+done
+omx_bin=${OMX_BIN:-omx}
+tmux_bin=${TMUX_BIN:-tmux}
+command -v "$omx_bin" >/dev/null 2>&1 || fail "required OMX command not found: ${omx_bin}"
+command -v "$tmux_bin" >/dev/null 2>&1 || fail "required tmux command not found: ${tmux_bin}"
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'not inside a Git repository'
+repo_root=$(cd "$repo_root" && pwd -P)
+[ "$(pwd -P)" = "$repo_root" ] || fail "run from repository root: ${repo_root}"
+[ "$(git branch --show-current)" = main ] || fail 'current branch must be main'
+[ -z "$(git status --porcelain)" ] || fail 'main worktree is not clean'
+
+active_task_file=$(find_task_file "$active_task")
+slug=$(printf '%s' "$active_task" | tr '[:upper:]_' '[:lower:]-')
+active_branch="codex/qs-${slug}"
+active_session="qs-${slug}"
+worktree_root=${OMX_TASK_WORKTREE_ROOT:-"$(dirname "$repo_root")/$(basename "$repo_root")-task-worktrees"}
+active_worktree="${worktree_root}/${slug}"
+
+git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+state_dir="${git_common_dir}/finish-omx-task-state"
+state_file="${state_dir}/${slug}.json"
+lock_dir="${git_common_dir}/finish-omx-task.lock"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  fail "another finish-omx-task is active or stale: ${lock_dir}"
+fi
+lock_acquired=1
+
+if [ -f "$state_file" ]; then
+  state_load
+fi
+
+if [ "$state_phase" != verified ]; then
+  [ -d "$active_worktree" ] || fail "Task worktree does not exist: ${active_worktree}"
+  active_worktree=$(cd "$active_worktree" && pwd -P)
+  git show-ref --verify --quiet "refs/heads/${active_branch}" || fail "Task branch does not exist: ${active_branch}"
+  [ "$(git -C "$active_worktree" branch --show-current)" = "$active_branch" ] || fail 'Task worktree branch does not match TASK_ID'
+  main_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+  worktree_common_dir=$(git -C "$active_worktree" rev-parse --path-format=absolute --git-common-dir)
+  [ "$worktree_common_dir" = "$main_common_dir" ] || fail 'Task worktree does not share the main Git repository'
+fi
+
+verification_file=$(mktemp "${TMPDIR:-/tmp}/finish-omx-verification.XXXXXX")
+
+if [ -z "$state_phase" ]; then
+  main_task_status=$(read_field '- Status' "$active_task_file")
+  load_launch_state
+  case "$main_task_status" in
+    ready|in_progress)
+      [ "$launch_derived_ready" = false ] || fail 'launch state claims derived-ready for a non-blocked Task'
+      ;;
+    blocked)
+      [ "$launch_derived_ready" = true ] || fail 'blocked Task was not launched through the derived-ready gate'
+      task_allows_file "$active_task_file" "$active_task_file" || fail "derived-ready requires ${active_task_file} in its own Allowed Files"
+      validate_dependencies_done "$active_task_file"
+      ;;
+    *) fail "main Task status must be ready, in_progress, or derived blocked; got ${main_task_status:-missing}" ;;
+  esac
+  observe_reference_drift
+
+  base_main=$(git rev-parse main)
+  pre_shutdown_head=$(git -C "$active_worktree" rev-parse HEAD)
+  [ "$(git -C "$active_worktree" rev-list --count "${base_main}..HEAD")" -gt 0 ] || fail 'Task branch has no commits not already on main'
+  [ -z "$(git -C "$active_worktree" status --porcelain)" ] || fail 'Task worktree is not clean'
+
+  configs=$(find "$active_worktree/.omx/state/team" -mindepth 2 -maxdepth 2 -name config.json -print 2>/dev/null || true)
+  config_count=$(printf '%s\n' "$configs" | awk 'NF { count += 1 } END { print count + 0 }')
+  [ "$config_count" -eq 1 ] || fail "expected one OMX team config, found ${config_count}"
+  config_file=$configs
+  active_team=$(basename "$(dirname "$config_file")")
+  config_values=$(python3 - "$config_file" "$active_team" "$active_worktree" "$active_session" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path, team, worktree, session = sys.argv[1:]
+data = json.loads(Path(path).read_text())
+if data.get("name") not in (None, team):
+    raise SystemExit("team config name does not match its directory")
+if not data.get("leader_cwd") or Path(data["leader_cwd"]).resolve() != Path(worktree).resolve():
+    raise SystemExit("team config leader_cwd does not match Task worktree")
+pane = data.get("leader_pane_id")
+if not isinstance(pane, str) or not re.fullmatch(r"%[0-9]+", pane):
+    raise SystemExit("team config has no valid leader pane")
+configured_session = data.get("tmux_session")
+if configured_session != session and not str(configured_session).startswith(session + ":"):
+    raise SystemExit("team config tmux session does not match TASK_ID")
+print(pane)
+PY
+) || fail 'invalid team ownership metadata'
+  active_leader_pane=$config_values
+
+  "$tmux_bin" has-session -t "$active_session" 2>/dev/null || fail "Task tmux session is missing: ${active_session}"
+  resolve_leader_pane "$active_leader_pane" "$active_session" "$active_worktree"
+  active_leader_pane=$resolved_leader_pane
+
+  set +e
+  status_json=$(cd "$active_worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$active_worktree" "$omx_bin" team status "$active_team" --json 2>&1)
+  status_rc=$?
+  set -e
+  [ "$status_rc" -eq 0 ] || fail "could not read team status: ${status_json}"
+  printf '%s\n' "$status_json" | validate_terminal_status || fail 'team is not complete or terminal counts are inconsistent'
+
+  evidence_files=$(find "$active_worktree/.omx/context" -maxdepth 1 -type f -name "${slug}*final-evidence*.md" -print 2>/dev/null || true)
+  evidence_count=$(printf '%s\n' "$evidence_files" | awk 'NF { count += 1 } END { print count + 0 }')
+  [ "$evidence_count" -eq 1 ] || fail "expected one final evidence file, found ${evidence_count}"
+  evidence_file=$evidence_files
+  evidence_heads=$(sed -n 's/^[[:space:]]*-[[:space:]]*Final \(leader \)\{0,1\}HEAD: `\([0-9a-f][0-9a-f]*\)`[[:space:]]*$/\2/p' "$evidence_file")
+  evidence_head_count=$(printf '%s\n' "$evidence_heads" | awk 'NF { count += 1 } END { print count + 0 }')
+  [ "$evidence_head_count" -eq 1 ] || fail "final evidence must contain exactly one Final HEAD field, found ${evidence_head_count}"
+  evidence_head=$evidence_heads
+  [[ "$evidence_head" =~ ^[0-9a-f]{40}$ ]] || fail 'final evidence has no full Final HEAD'
+  git -C "$active_worktree" cat-file -e "${evidence_head}^{commit}" 2>/dev/null || fail 'final evidence HEAD is not a commit'
+  git -C "$active_worktree" merge-base --is-ancestor "$evidence_head" "$pre_shutdown_head" || fail 'final evidence HEAD is not an ancestor of Task HEAD'
+  [ "$(git -C "$active_worktree" rev-parse "${evidence_head}^{tree}")" = "$(git -C "$active_worktree" rev-parse "${pre_shutdown_head}^{tree}")" ] || fail 'Task tree differs from leader final evidence'
+
+  if ! run_verification pre-shutdown "$active_worktree" HEAD "$base_main"; then
+    fail 'verification failed at pre-shutdown'
+  fi
+
+  set +e
+  shutdown_output=$(cd "$active_worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$active_worktree" "$omx_bin" team shutdown "$active_team" 2>&1)
+  shutdown_rc=$?
+  set -e
+  [ "$shutdown_rc" -eq 0 ] || fail "team shutdown failed: ${shutdown_output}"
+  post_shutdown_head=$(git -C "$active_worktree" rev-parse HEAD)
+  git -C "$active_worktree" merge-base --is-ancestor "$pre_shutdown_head" "$post_shutdown_head" || fail 'shutdown rewrote Task history'
+
+  state_authority_main=$base_main
+  state_approved_head=$pre_shutdown_head
+  state_approved_tree=$(git -C "$active_worktree" rev-parse "${pre_shutdown_head}^{tree}")
+  state_team=$active_team
+  state_leader_pane=$active_leader_pane
+  state_verification_runs=$verification_runs
+  state_write shutdown
+  [ "$(git rev-parse main)" = "$state_authority_main" ] || fail 'main advanced during finish; rerun the same recovery command'
+fi
+
+active_team=$state_team
+active_leader_pane=$state_leader_pane
+verification_runs=$state_verification_runs
+observe_reference_drift
+
+if [ "$state_phase" = shutdown ]; then
+  git -C "$active_worktree" merge-base --is-ancestor "$state_approved_head" HEAD || fail 'shutdown rewrote Task history'
+  git -C "$active_worktree" diff --quiet "${state_approved_head}..HEAD" || fail 'shutdown changed repository content; repair the Task branch and rerun the recovery command'
+  [ -z "$(git -C "$active_worktree" status --porcelain)" ] || fail 'Task worktree became dirty during shutdown'
+  if "$tmux_bin" has-session -t "$active_session" 2>/dev/null; then
+    set +e
+    tmux_output=$("$tmux_bin" kill-session -t "$active_session" 2>&1)
+    tmux_rc=$?
+    set -e
+  else
+    tmux_output='already absent'
+    tmux_rc=0
+  fi
+  if "$tmux_bin" has-session -t "$active_session" 2>/dev/null; then
+    fail "tmux session remains after cleanup: ${active_session} (kill exit ${tmux_rc}: ${tmux_output})"
+  fi
+  state_write session-stopped
+fi
+
+if [ "$state_phase" = rebased ]; then
+  [ "$(git -C "$active_worktree" rev-parse HEAD)" = "$state_rebased_head" ] || fail 'Task branch advanced after the verified rebase'
+  if [ "$(git rev-parse main)" != "$state_integration_main" ]; then
+    state_integration_main=
+    state_rebased_head=
+    state_verification_runs=1
+    verification_runs=1
+    state_write session-stopped
+  fi
+fi
+
+if [ "$state_phase" = session-stopped ]; then
+  [ -z "$(git -C "$active_worktree" status --porcelain)" ] || fail 'Task worktree is not clean before resumable rebase'
+  [ -z "$(git status --porcelain)" ] || fail 'main worktree became dirty during finish'
+  observe_reference_drift
+  base_main=$(git rev-parse main)
+  state_integration_main=$base_main
+  if ! GIT_EDITOR=: GIT_SEQUENCE_EDITOR=: git -C "$active_worktree" rebase --rebase-merges main; then
+    git -C "$active_worktree" rebase --abort >/dev/null 2>&1 || true
+    fail 'rebase with merge topology failed; conflict was not resolved automatically'
+  fi
+  compare_approved_content || fail 'rebased Task content differs from approved evidence'
+  if ! run_verification post-rebase "$active_worktree" HEAD "$base_main"; then
+    fail 'verification failed at post-rebase'
+  fi
+  [ "$(git rev-parse main)" = "$base_main" ] || fail 'main advanced during finish'
+  [ -z "$(git status --porcelain)" ] || fail 'main worktree became dirty during finish'
+  state_rebased_head=$(git -C "$active_worktree" rev-parse HEAD)
+  state_verification_runs=$verification_runs
+  state_write rebased
+fi
+
+if [ "$state_phase" = rebased ]; then
+  [ "$(git rev-parse main)" = "$state_integration_main" ] || fail 'main advanced after the verified rebase'
+  [ "$(git -C "$active_worktree" rev-parse HEAD)" = "$state_rebased_head" ] || fail 'Task branch advanced after the verified rebase'
+  git merge --ff-only "$active_branch" || fail 'ff-only merge failed'
+  state_merged_head=$(git rev-parse HEAD)
+  [ "$state_merged_head" = "$state_rebased_head" ] || fail 'main HEAD does not equal verified Task HEAD'
+  state_write merged
+fi
+
+if [ "$state_phase" = merged ]; then
+  [ "$(git rev-parse main)" = "$state_merged_head" ] || fail 'main advanced after merge; automatic cleanup is unsafe'
+  [ -d "$active_worktree" ] || fail 'Task worktree is missing before post-merge verification'
+  [ "$(git -C "$active_worktree" rev-parse HEAD)" = "$state_merged_head" ] || fail 'Task worktree no longer matches merged main'
+  if ! run_verification post-merge "$repo_root" HEAD "$state_integration_main"; then
+    fail 'verification failed at post-merge; repair the preserved main/worktree and rerun the same command'
+  fi
+  state_verification_runs=$verification_runs
+  state_write verified
+fi
+
+if [ "$state_phase" = verified ]; then
+  [ "$(git rev-parse main)" = "$state_merged_head" ] || fail 'main advanced before verified cleanup'
+  [ -z "$(git status --porcelain)" ] || fail 'main worktree is dirty before verified cleanup'
+  observe_reference_drift
+  if [ -d "$active_worktree" ]; then
+    git worktree remove "$active_worktree" || fail 'could not remove completed Task worktree'
+  fi
+  if git show-ref --verify --quiet "refs/heads/${active_branch}"; then
+    git branch -d "$active_branch" || fail 'could not delete merged Task branch'
+  fi
+  [ ! -e "$active_worktree" ] || fail 'Task worktree path remains after cleanup'
+  [ -z "$(git branch --list "$active_branch")" ] || fail 'Task branch remains after cleanup'
+  [ -z "$(git status --porcelain)" ] || fail 'main worktree is dirty after cleanup'
+  merged_head=$state_merged_head
+  rm -f "$state_file"
+  rmdir "$state_dir" >/dev/null 2>&1 || true
+fi
+
+printf 'mode=finished\n'
+printf 'task_id=%s\n' "$active_task"
+printf 'task_file=%s\n' "$active_task_file"
+printf 'team_name=%s\n' "$active_team"
+printf 'main_before=%s\n' "$state_integration_main"
+printf 'main_after=%s\n' "$merged_head"
+printf 'rebase_mode=--rebase-merges\n'
+printf 'verification_runs=%s\n' "$state_verification_runs"
+printf 'resumed=%s\n' "$resumed"

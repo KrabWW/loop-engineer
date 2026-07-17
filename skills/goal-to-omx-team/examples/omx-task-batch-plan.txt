@@ -1,0 +1,5 @@
+# custom mode: Tasks on one line run as one independent parallel wave.
+PROTO-AI-001, PROTO-KNOWLEDGE-002
+
+# The next line starts only after the previous wave is terminal and merged.
+PROTO-REQUIREMENTS-001

@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+wave_file=
+active_tasks=()
+active_finished=()
+active_count=0
+
+print_recovery() {
+  index=0
+  while [ "$index" -lt "$active_count" ]; do
+    if [ "${active_finished[$index]:-0}" -eq 0 ]; then
+      printf 'recovery_task=%s\n' "${active_tasks[$index]}" >&2
+      printf 'recovery_command=./scripts/finish-omx-task %s\n' "${active_tasks[$index]}" >&2
+    fi
+    index=$((index + 1))
+  done
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  print_recovery
+  exit 1
+}
+
+cleanup() {
+  rc=$?
+  [ -z "$wave_file" ] || rm -f "$wave_file"
+  exit "$rc"
+}
+trap cleanup EXIT
+
+usage() {
+  printf '%s\n' \
+    'Usage: ./scripts/run-omx-task-batch [--dry-run] [--mode serial|parallel|custom] [--max-parallel N] <PLAN_FILE>' \
+    '' \
+    'serial: one Task per wave' \
+    'parallel: chunk all Tasks into independent waves' \
+    'custom: each non-empty plan line is one parallel wave; waves run serially'
+}
+
+output_value() {
+  key=$1
+  content=$2
+  printf '%s\n' "$content" | sed -n "s/^${key}=//p" | tail -1
+}
+
+parse_status() {
+  python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+tasks = payload.get("tasks") or {}
+workers = payload.get("workers") or {}
+values = [
+    payload.get("status", "missing"),
+    payload.get("phase", "missing"),
+    tasks.get("total", -1),
+    tasks.get("pending", -1),
+    tasks.get("blocked", -1),
+    tasks.get("in_progress", -1),
+    tasks.get("completed", -1),
+    tasks.get("failed", -1),
+    workers.get("dead", -1),
+    workers.get("non_reporting", -1),
+]
+print(" ".join(str(value) for value in values))
+'
+}
+
+resolve_leader_pane() {
+  task=$1
+  worktree=$2
+  session=$3
+  configured_pane=$4
+  resolved_leader_pane=
+
+  set +e
+  pane_rows=$("$tmux_bin" list-panes -a -F '#{pane_id}|#{session_name}|#{pane_dead}|#{pane_current_path}|#{pane_start_command}' 2>/dev/null)
+  list_rc=$?
+  set -e
+  [ "$list_rc" -eq 0 ] || fail "could not inspect Task tmux session for ${task}: ${session}"
+  candidates=$(printf '%s\n' "$pane_rows" | awk -F '|' -v session="$session" -v worktree="$worktree" '$2 == session && $3 == "0" && $4 == worktree && $5 !~ /hud --watch/ && $5 !~ /OMX_TMUX_HUD_OWNER/ { print $1 }')
+  candidate_count=$(printf '%s\n' "$candidates" | awk 'NF { count += 1 } END { print count + 0 }')
+  if printf '%s\n' "$candidates" | rg -F -x -- "$configured_pane" >/dev/null; then
+    resolved_leader_pane=$configured_pane
+    return 0
+  fi
+  [ "$candidate_count" -ne 0 ] || fail "no live exact-cwd leader pane for ${task} in ${session}"
+  [ "$candidate_count" -eq 1 ] || fail "multiple live exact-cwd leader panes for ${task} in ${session}"
+  resolved_leader_pane=$candidates
+  if [ "$resolved_leader_pane" != "$configured_pane" ]; then
+    printf 'leader_pane_recovered=%s old=%s new=%s\n' "$task" "$configured_pane" "$resolved_leader_pane"
+  fi
+}
+
+wait_for_terminal() {
+  task=$1
+  worktree=$2
+  team=$3
+  session=$4
+  pane=$5
+  unhealthy_since=0
+  finalization_wait_reported=0
+  while true; do
+    resolve_leader_pane "$task" "$worktree" "$session" "$pane"
+    pane=$resolved_leader_pane
+    set +e
+    status_json=$(cd "$worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$worktree" "$omx_bin" team status "$team" --json 2>&1)
+    status_rc=$?
+    set -e
+    [ "$status_rc" -eq 0 ] || fail "could not read team status for ${task}: ${status_json}"
+    set +e
+    parsed=$(printf '%s\n' "$status_json" | parse_status 2>/dev/null)
+    parsed_rc=$?
+    set -e
+    [ "$parsed_rc" -eq 0 ] || fail "invalid team status JSON for ${task}"
+    read -r runtime_status phase total pending blocked in_progress completed failed dead non_reporting <<EOF
+$parsed
+EOF
+    [ "$runtime_status" = ok ] || fail "team state is ${runtime_status} for ${task}"
+    [ "$failed" -eq 0 ] || fail "team reached terminal failure phase ${phase} for ${task}"
+    if [ "$dead" -gt 0 ] || [ "$non_reporting" -gt 0 ]; then
+      now=$(date +%s)
+      if [ "$unhealthy_since" -eq 0 ]; then
+        unhealthy_since=$now
+        printf 'task_health_wait=%s dead=%s non_reporting=%s grace_seconds=%s\n' \
+          "$task" "$dead" "$non_reporting" "$unhealthy_grace_seconds"
+      elif [ $((now - unhealthy_since)) -ge "$unhealthy_grace_seconds" ]; then
+        fail "team worker health did not recover within ${unhealthy_grace_seconds} seconds for ${task}"
+      fi
+    else
+      unhealthy_since=0
+    fi
+    case "$phase" in
+      failed|cancelled) fail "team reached terminal failure phase ${phase} for ${task}" ;;
+      complete)
+        [ "$total" -gt 0 ] || fail "team reported no tasks for ${task}"
+        [ "$pending" -eq 0 ] || fail "complete team still has pending tasks for ${task}"
+        [ "$in_progress" -eq 0 ] || fail "complete team still has in-progress tasks for ${task}"
+        [ "$completed" -eq "$total" ] || fail "team terminal counts are inconsistent for ${task}"
+        slug=$(printf '%s' "$task" | tr '[:upper:]_' '[:lower:]-')
+        evidence_files=$(find "$worktree/.omx/context" -maxdepth 1 -type f -name "${slug}*final-evidence*.md" -print 2>/dev/null || true)
+        evidence_count=$(printf '%s\n' "$evidence_files" | awk 'NF { count += 1 } END { print count + 0 }')
+        [ "$evidence_count" -le 1 ] || fail "expected at most one final evidence file while waiting for ${task}, found ${evidence_count}"
+        evidence_ready=0
+        if [ "$evidence_count" -eq 1 ]; then
+          evidence_heads=$(sed -n 's/^[[:space:]]*-[[:space:]]*Final \(leader \)\{0,1\}HEAD: `\([0-9a-f][0-9a-f]*\)`[[:space:]]*$/\2/p' "$evidence_files")
+          evidence_head_count=$(printf '%s\n' "$evidence_heads" | awk 'NF { count += 1 } END { print count + 0 }')
+          if [ "$evidence_head_count" -eq 1 ] && [[ "$evidence_heads" =~ ^[0-9a-f]{40}$ ]]; then
+            evidence_ready=1
+          fi
+        fi
+        if [ "$evidence_ready" -eq 1 ]; then
+          resolve_leader_pane "$task" "$worktree" "$session" "$pane"
+          return 0
+        fi
+        if [ "$finalization_wait_reported" -eq 0 ]; then
+          printf 'task_finalization_wait=%s evidence_count=%s\n' "$task" "$evidence_count"
+          finalization_wait_reported=1
+        fi
+        sleep "$finalization_poll_seconds"
+        ;;
+      team-plan|team-prd|team-exec|team-verify|team-fix) ;;
+      *) fail "unknown team phase ${phase} for ${task}" ;;
+    esac
+    set +e
+    await_output=$(cd "$worktree" && OMX_AUTO_UPDATE=0 OMX_ROOT="$worktree" "$omx_bin" team await "$team" --timeout-ms "$await_ms" --json 2>&1)
+    await_rc=$?
+    set -e
+    [ "$await_rc" -eq 0 ] || fail "team await failed for ${task}: ${await_output}"
+  done
+}
+
+dry_run=0
+mode=serial
+max_parallel=2
+finalization_poll_seconds=${OMX_BATCH_FINALIZATION_POLL_SECONDS:-1}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=1; shift ;;
+    --mode)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      mode=$2
+      shift 2
+      ;;
+    --max-parallel)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      max_parallel=$2
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    --*) fail "unknown option: $1" ;;
+    *) break ;;
+  esac
+done
+[ "$#" -eq 1 ] || { usage >&2; exit 2; }
+case "$mode" in serial|parallel|custom) ;; *) fail "invalid mode: ${mode}" ;; esac
+[[ "$max_parallel" =~ ^[1-9][0-9]*$ ]] || fail '--max-parallel must be a positive integer'
+[[ "$finalization_poll_seconds" =~ ^[0-9]+$ ]] || fail 'OMX_BATCH_FINALIZATION_POLL_SECONDS must be a non-negative integer'
+
+for command_name in git python3 date; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
+done
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'not inside a Git repository'
+repo_root=$(cd "$repo_root" && pwd -P)
+[ "$(pwd -P)" = "$repo_root" ] || fail "run from repository root: ${repo_root}"
+[ "$(git branch --show-current)" = main ] || fail 'current branch must be main'
+[ -z "$(git status --porcelain)" ] || fail 'main worktree is not clean'
+
+plan_file=$1
+[ -f "$plan_file" ] || fail "plan file not found: ${plan_file}"
+plan_file=$(cd "$(dirname "$plan_file")" && pwd -P)/$(basename "$plan_file")
+wave_file=$(mktemp "${TMPDIR:-/tmp}/omx-task-waves.XXXXXX")
+python3 - "$plan_file" "$mode" "$max_parallel" "$wave_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+source, mode, maximum, destination = sys.argv[1:]
+maximum = int(maximum)
+lines = []
+seen = set()
+for raw in Path(source).read_text().splitlines():
+    raw = raw.split("#", 1)[0].strip()
+    if not raw:
+        continue
+    tasks = [part for part in re.split(r"[\s,]+", raw) if part]
+    for task in tasks:
+        if not re.fullmatch(r"[A-Z][A-Z0-9-]+", task):
+            raise SystemExit(f"invalid TASK_ID: {task}")
+        if task in seen:
+            raise SystemExit(f"duplicate TASK_ID: {task}")
+        seen.add(task)
+    lines.append(tasks)
+if not lines:
+    raise SystemExit("plan contains no Task IDs")
+flat = [task for line in lines for task in line]
+if mode == "serial":
+    waves = [[task] for task in flat]
+elif mode == "parallel":
+    waves = [flat[index:index + maximum] for index in range(0, len(flat), maximum)]
+else:
+    oversized = [line for line in lines if len(line) > maximum]
+    if oversized:
+        raise SystemExit("custom wave exceeds --max-parallel")
+    waves = lines
+Path(destination).write_text("\n".join(",".join(wave) for wave in waves) + "\n")
+PY
+
+wave_count=$(awk 'NF { count += 1 } END { print count + 0 }' "$wave_file")
+if [ "$dry_run" -eq 1 ]; then
+  printf 'mode=dry-run\n'
+  printf 'schedule=%s\n' "$mode"
+  printf 'max_parallel=%s\n' "$max_parallel"
+  printf 'waves=%s\n' "$wave_count"
+  wave_number=0
+  while IFS= read -r wave || [ -n "$wave" ]; do
+    [ -n "$wave" ] || continue
+    wave_number=$((wave_number + 1))
+    printf 'wave_%s=%s\n' "$wave_number" "$wave"
+  done < "$wave_file"
+  exit 0
+fi
+
+starter=${OMX_TASK_STARTER:-"${repo_root}/scripts/start-omx-task"}
+finisher=${OMX_TASK_FINISHER:-"${repo_root}/scripts/finish-omx-task"}
+omx_bin=${OMX_BIN:-omx}
+tmux_bin=${TMUX_BIN:-tmux}
+await_ms=${OMX_BATCH_AWAIT_MS:-30000}
+unhealthy_grace_seconds=${OMX_BATCH_UNHEALTHY_GRACE_SECONDS:-300}
+[ -x "$starter" ] || fail "Task launcher is not executable: ${starter}"
+[ -x "$finisher" ] || fail "Task finisher is not executable: ${finisher}"
+command -v "$omx_bin" >/dev/null 2>&1 || fail "OMX command not found: ${omx_bin}"
+command -v "$tmux_bin" >/dev/null 2>&1 || fail "tmux command not found: ${tmux_bin}"
+[[ "$await_ms" =~ ^[1-9][0-9]*$ ]] || fail 'OMX_BATCH_AWAIT_MS must be positive'
+[[ "$unhealthy_grace_seconds" =~ ^[1-9][0-9]*$ ]] || fail 'OMX_BATCH_UNHEALTHY_GRACE_SECONDS must be positive'
+
+completed=0
+wave_number=0
+while IFS= read -r wave || [ -n "$wave" ]; do
+  [ -n "$wave" ] || continue
+  wave_number=$((wave_number + 1))
+  IFS=',' read -r -a wave_tasks <<EOF
+$wave
+EOF
+  wave_size=${#wave_tasks[@]}
+  wave_worktrees=()
+  wave_teams=()
+  wave_sessions=()
+  wave_panes=()
+  wave_active=()
+  active_tasks=()
+  active_finished=()
+  active_count=0
+  printf 'wave_started=%s size=%s\n' "$wave_number" "$wave_size"
+
+  index=0
+  while [ "$index" -lt "$wave_size" ]; do
+    task=${wave_tasks[$index]}
+    set +e
+    launch_output=$("$starter" --resume-existing --allow-derived-ready "$task" 2>&1)
+    launch_rc=$?
+    set -e
+    [ "$launch_rc" -eq 0 ] || { printf '%s\n' "$launch_output" >&2; fail "starter failed for ${task}"; }
+    launch_mode=$(output_value mode "$launch_output")
+    case "$launch_mode" in
+      started|resumed) ;;
+      already-finished)
+        main_after=$(output_value main_after "$launch_output")
+        [ "$main_after" = "$(git rev-parse main)" ] || fail "starter main_after mismatch for already-finished ${task}"
+        wave_active[$index]=0
+        active_tasks[$index]=$task
+        active_finished[$index]=1
+        active_count=$((index + 1))
+        completed=$((completed + 1))
+        printf 'task_already_finished=%s wave=%s main=%s\n' "$task" "$wave_number" "$main_after"
+        index=$((index + 1))
+        continue
+        ;;
+      *) fail "starter returned invalid mode for ${task}: ${launch_mode:-missing}" ;;
+    esac
+    worktree=$(output_value worktree "$launch_output")
+    team=$(output_value team_name "$launch_output")
+    session=$(output_value tmux_session "$launch_output")
+    pane=$(output_value leader_pane "$launch_output")
+    [ -d "$worktree" ] || fail "starter returned missing worktree for ${task}"
+    [[ "$team" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || fail "starter returned invalid team for ${task}"
+    [[ "$session" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || fail "starter returned invalid tmux session for ${task}"
+    [[ "$pane" =~ ^%[0-9]+$ ]] || fail "starter returned invalid leader pane for ${task}"
+    wave_worktrees[$index]=$worktree
+    wave_teams[$index]=$team
+    wave_sessions[$index]=$session
+    wave_panes[$index]=$pane
+    wave_active[$index]=1
+    active_tasks[$index]=$task
+    active_finished[$index]=0
+    active_count=$((index + 1))
+    printf 'task_%s=%s wave=%s\n' "$launch_mode" "$task" "$wave_number"
+    index=$((index + 1))
+  done
+
+  index=0
+  while [ "$index" -lt "$wave_size" ]; do
+    if [ "${wave_active[$index]:-0}" -eq 0 ]; then
+      index=$((index + 1))
+      continue
+    fi
+    wait_for_terminal "${wave_tasks[$index]}" "${wave_worktrees[$index]}" "${wave_teams[$index]}" "${wave_sessions[$index]}" "${wave_panes[$index]}"
+    printf 'task_terminal=%s wave=%s\n' "${wave_tasks[$index]}" "$wave_number"
+    index=$((index + 1))
+  done
+
+  index=0
+  while [ "$index" -lt "$wave_size" ]; do
+    if [ "${wave_active[$index]:-0}" -eq 0 ]; then
+      index=$((index + 1))
+      continue
+    fi
+    task=${wave_tasks[$index]}
+    set +e
+    finish_output=$("$finisher" "$task" 2>&1)
+    finish_rc=$?
+    set -e
+    [ "$finish_rc" -eq 0 ] || { printf '%s\n' "$finish_output" >&2; fail "finisher failed for ${task}"; }
+    [ "$(output_value mode "$finish_output")" = finished ] || fail "finisher returned no finished mode for ${task}"
+    main_after=$(output_value main_after "$finish_output")
+    [ "$main_after" = "$(git rev-parse main)" ] || fail "finisher main_after mismatch for ${task}"
+    active_finished[$index]=1
+    completed=$((completed + 1))
+    printf 'task_finished=%s wave=%s main=%s\n' "$task" "$wave_number" "$main_after"
+    index=$((index + 1))
+  done
+  active_tasks=()
+  active_finished=()
+  active_count=0
+  printf 'wave_finished=%s\n' "$wave_number"
+done < "$wave_file"
+
+printf 'batch_status=complete\n'
+printf 'schedule=%s\n' "$mode"
+printf 'waves=%s\n' "$wave_count"
+printf 'completed=%s\n' "$completed"
