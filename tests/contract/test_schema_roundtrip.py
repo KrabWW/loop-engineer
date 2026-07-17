@@ -73,6 +73,7 @@ PAYLOADS = {
         "last_event_sequence": 1, "journal_checksum": f"sha256:{_HEX64}",
         "current_phase": "omc_executing", "writer_fencing_generation": 0, "shutdown_acks": [],
     },
+    "task_board_entry": {"task_id": "T1"},
     "provenance": {"entries": []},
 }
 

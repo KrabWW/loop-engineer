@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "Claim": {
+      "properties": {
+        "generation": {
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "holder": {
+          "minLength": 1,
+          "title": "Holder",
+          "type": "string"
+        },
+        "omx_task_id": {
+          "minLength": 1,
+          "title": "Omx Task Id",
+          "type": "string"
+        },
+        "token_digest": {
+          "title": "Token Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "omx_task_id",
+        "holder",
+        "generation",
+        "token_digest"
+      ],
+      "title": "Claim",
+      "type": "object"
+    },
+    "Lease": {
+      "properties": {
+        "expires_at": {
+          "minLength": 1,
+          "title": "Expires At",
+          "type": "string"
+        },
+        "generation": {
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "last_heartbeat_at": {
+          "minLength": 1,
+          "title": "Last Heartbeat At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation",
+        "expires_at",
+        "last_heartbeat_at"
+      ],
+      "title": "Lease",
+      "type": "object"
+    },
+    "Provider": {
+      "enum": [
+        "omx",
+        "omc"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "TaskRunStatus": {
+      "enum": [
+        "pending",
+        "claimed",
+        "released",
+        "done",
+        "failed"
+      ],
+      "title": "TaskRunStatus",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "attempt_id": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Attempt Id",
+      "type": "integer"
+    },
+    "claim": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Claim"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "lease": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Lease"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provider"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "status": {
+      "$ref": "#/$defs/TaskRunStatus",
+      "default": "pending"
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "title": "TaskBoardEntry",
+  "type": "object"
+}

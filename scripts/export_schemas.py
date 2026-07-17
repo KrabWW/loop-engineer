@@ -24,6 +24,7 @@ from loop_engineer.contracts.plan import Plan
 from loop_engineer.contracts.provenance import ProvenanceManifest
 from loop_engineer.contracts.recovery import RecoveryRecord
 from loop_engineer.contracts.task import Task
+from loop_engineer.contracts.task_run import TaskBoardEntry
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas" / "v1"
@@ -41,6 +42,7 @@ MODELS = {
     "handoff": Handoff,
     "fence": WriterFence,
     "recovery": RecoveryRecord,
+    "task_board_entry": TaskBoardEntry,
     "provenance": ProvenanceManifest,
 }
 
