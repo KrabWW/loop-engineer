@@ -93,8 +93,46 @@ if [ -z "$team_name" ]; then
   candidates=$(discover_team_dirs)
   candidate_count=$(printf '%s\n' "$candidates" | awk 'NF { c += 1 } END { print c + 0 }')
   [ "$candidate_count" -gt 0 ] || fail "no OMC team state under ${state_base}; run ./scripts/start-omc-task ${task_id}"
-  [ "$candidate_count" -eq 1 ] || fail "multiple OMC teams under ${state_base}; inspect before continuing"
-  team_name=$(printf '%s\n' "$candidates" | head -1)
+  if [ "$candidate_count" -eq 1 ]; then
+    team_name=$(printf '%s\n' "$candidates" | awk 'NF { print; exit }')
+  else
+    live_candidates=
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      [[ "$candidate" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || continue
+      if candidate_json=$(cd "$worktree" 2>/dev/null && OMC_RUNTIME_V2=1 OMC_STATE_DIR="$state_base" OMC_TEAM_WORKTREE_MODE=branch \
+        "$omc_bin" team api get-summary --input "{\"team_name\":\"${candidate}\"}" --json 2>/dev/null); then
+        if printf '%s\n' "$candidate_json" | python3 -c '
+import json
+import sys
+expected = sys.argv[1]
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+summary = (payload.get("data") or {}).get("summary") or {}
+tasks = summary.get("tasks") or {}
+valid = (
+    payload.get("ok") is True
+    and summary.get("teamName") == expected
+    and isinstance(tasks.get("total"), int)
+    and tasks["total"] > 0
+)
+raise SystemExit(0 if valid else 1)
+' "$candidate"; then
+          live_candidates="${live_candidates}${candidate}"$'\n'
+        fi
+      fi
+    done <<EOF
+$candidates
+EOF
+    live_count=$(printf '%s\n' "$live_candidates" | awk 'NF { c += 1 } END { print c + 0 }')
+    [ "$live_count" -gt 0 ] || fail "multiple stale OMC team directories under ${state_base}; no queryable team"
+    [ "$live_count" -eq 1 ] || fail "multiple live OMC teams under ${state_base}; inspect before continuing"
+    team_name=$(printf '%s\n' "$live_candidates" | awk 'NF { print; exit }')
+    printf 'WARNING: multiple OMC teams under %s; selected unique queryable team %s and ignored stale directories.\n' \
+      "$state_base" "$team_name" >&2
+  fi
 fi
 
 # Locate the team state root (the dir containing workers/) for either layout.
@@ -103,7 +141,7 @@ workers_dir=$({
   if [ -d "$worktree/.omc/state/team/${team_name}/workers" ]; then
     printf '%s\n' "$worktree/.omc/state/team/${team_name}/workers"
   fi
-} | head -1)
+} | awk 'NF && !seen[$0]++ && first == "" { first = $0 } END { print first }')
 [ -n "$workers_dir" ] || fail "team state for ${team_name} not found under ${state_base}"
 
 leader_pane=

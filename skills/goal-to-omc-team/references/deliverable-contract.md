@@ -77,20 +77,20 @@ Manual launches accept only explicit `ready`. `--allow-derived-ready` is reserve
 The launcher must create a detached tmux session rooted in the Task integration worktree, capture its initial leader pane with `-P -F '#{pane_id}'`, and run, using `exec` so pane liveness is process liveness:
 
 ```sh
-exec env OMC_RUNTIME_V2=1 OMC_STATE_DIR=<absolute-task-state-base> OMC_TEAM_WORKTREE_MODE=branch \
+exec env OMC_RUNTIME_V2=1 OMC_STATE_DIR=<absolute-task-state-base> OMC_TEAM_WORKTREE_MODE=branch OMC_TEAM_NO_RC=1 \
   omc launch --madmax --notify false <leader-prompt>
 ```
 
 The persistent Claude leader invokes exactly one `omc team 1:claude:executor --auto-merge --no-decompose "<atomic-task>"` command. `<atomic-task>` is one atomic sentence without semicolons, bullets, newlines, or unrelated clauses because `--no-decompose` treats the text as fixed worker scope. The leader stays alive to assign non-overlapping work, integrate worker commits via runtime auto-merge, verify the exact integrated HEAD, and produce final evidence.
 
-The Task-isolated state base is `<git-common-dir>/omc-task-state/<slug>`; OMC may append a project identifier beneath it, so team discovery globs recursively for `config.json` under that base, confined to it, requiring exactly one. Startup is successful only when exactly one team config exists below the base, `omc team api get-summary` reports exactly one worker, zero dead and non-reporting workers, at least one runtime task, and the captured leader pane still reports `pane_dead=0`. On success, write deterministic launch JSON in the state base with the derived-ready decision, `leader_pane`, `team_name`, `omc_version`, `refer_fingerprint_version=content-v2`, and a content-stable fingerprint of the repository-root `refer/` tree. The fingerprint ignores mtime plus nested `.git`, `.omc`, `.omx`, and `.DS_Store` metadata while still hashing protected paths, types, permissions, file content, and symlink targets. Print Task, base commit, branch, integration worktree, tmux session, leader pane, state base, Team name, monitoring commands, and `./scripts/finish-omc-task <TASK_ID>`. Keep the contract adapter-neutral.
+The Task-isolated state base is `<git-common-dir>/omc-task-state/<slug>`; OMC may append a project identifier beneath it, so team discovery finds `*/state/team/<team-name>/workers` directories recursively but never scans outside that base. Create the leader session at least `160x40` (default `240x60`) and persist its exact `leader_pane` to launch JSON immediately after tmux creation, before polling Team readiness. Startup is successful only when exactly one API-queryable Team is identified, `omc team api get-summary` reports exactly one worker, zero dead and non-reporting workers, at least one runtime task, and the captured leader pane still reports `pane_dead=0`. On success, extend deterministic launch JSON with `team_name`, `omc_version`, `refer_fingerprint_version=content-v2`, and a content-stable fingerprint of the repository-root `refer/` tree. If retries leave multiple Team directories, query every candidate through exact cwd and state-base-bound `get-summary`: select only a unique valid candidate and never guess by mtime; zero or multiple valid candidates fail closed. The fingerprint ignores mtime plus nested `.git`, `.omc`, `.omx`, and `.DS_Store` metadata while still hashing protected paths, types, permissions, file content, and symlink targets. Print Task, base commit, branch, integration worktree, tmux session, leader pane, state base, Team name, monitoring commands, and `./scripts/finish-omc-task <TASK_ID>`. Keep the contract adapter-neutral.
 
 ## 6. Required launcher tests
 
 Use temporary Git repositories and fake OMC/tmux binaries. Prove:
 
 - successful creation and a captured non-empty authoritative prompt;
-- persistent leader argv includes `exec`, `OMC_RUNTIME_V2=1`, `OMC_STATE_DIR=`, `OMC_TEAM_WORKTREE_MODE=branch`, `omc launch --madmax --notify false`, and never `omx`;
+- persistent leader argv includes `exec`, `OMC_RUNTIME_V2=1`, `OMC_STATE_DIR=`, `OMC_TEAM_WORKTREE_MODE=branch`, `OMC_TEAM_NO_RC=1`, `omc launch --madmax --notify false`, and never `omx`;
 - one atomic sentence reaches `omc team 1:claude:executor --auto-merge --no-decompose` as one task;
 - dry-run creates no branch, worktree, tmux session, or OMC state;
 - invalid or ambiguous Task ID rejection;
@@ -98,7 +98,7 @@ Use temporary Git repositories and fake OMC/tmux binaries. Prove:
 - dirty base, duplicate resource, insufficient disk, excess concurrency, and stale-state-base rejection;
 - exact leader pane success even when worker panes keep the session alive;
 - leader exit before state cleans only when the entire session is gone;
-- leader exit after state, a worker-backed session, and startup timeout preserve explicit recovery state;
+- leader exit after state, a worker-backed session, and startup timeout preserve explicit recovery state including the captured leader pane;
 - `omc team api get-summary` remains cwd- and state-base-bound;
 - a sentinel fails the suite if the real `omc` binary is reached.
 
@@ -114,7 +114,7 @@ Each verification run must prove its commands did not change HEAD or leave the r
 
 ## 8. Read-only status
 
-Generate `./scripts/status-omc-task <TASK_ID>` and tests. It discovers the unique Team under the Task state base, prints task/branch/worktree/session/state-base/leader/Team, task counts, worker counts, heartbeat age, leader liveness, and the exact `tmux attach` and finish commands. `--watch` refreshes on a configurable interval and exits only at a valid terminal state or an explicit error. It never mutates Team state.
+Generate `./scripts/status-omc-task <TASK_ID>` and tests. It discovers the unique Team under the Task state base; when stale retry directories coexist, it resumes only the single candidate whose exact state-base-bound `get-summary` returns a matching positive-task summary. It never selects by mtime, and multiple live candidates fail closed. It prints task/branch/worktree/session/state-base/leader/Team, task counts, worker counts, heartbeat age, leader liveness, and the exact `tmux attach` and finish commands. `--watch` refreshes on a configurable interval and exits only at a valid terminal state or an explicit error. It never mutates Team state.
 
 ## 9. Integrated batch runner
 

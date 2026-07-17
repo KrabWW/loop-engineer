@@ -94,7 +94,7 @@ OMC_FAKE
 #!/usr/bin/env bash
 set -euo pipefail
 state=${FAKE_TMUX_STATE:?}
-mkdir -p "$state/sessions" "$state/panes" "$state/commands"
+mkdir -p "$state/sessions" "$state/panes" "$state/commands" "$state/dimensions"
 case "${1:-}" in
   -V) printf 'tmux fake\n' ;;
   has-session)
@@ -104,7 +104,7 @@ case "${1:-}" in
     for file in "$state/sessions"/*; do [ -f "$file" ] && basename "$file"; done
     ;;
   new-session)
-    shift; session=; cwd=; print_info=0; format=
+    shift; session=; cwd=; print_info=0; format=; columns=; rows=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -d) shift ;;
@@ -112,12 +112,15 @@ case "${1:-}" in
         -F) format=$2; shift 2 ;;
         -s) session=$2; shift 2 ;;
         -c) cwd=$2; shift 2 ;;
+        -x) columns=$2; shift 2 ;;
+        -y) rows=$2; shift 2 ;;
         *) break ;;
       esac
     done
     : "${session:?}" "${cwd:?}"
     [ "$#" -eq 1 ] || { printf 'fake tmux expected one shell command\n' >&2; exit 3; }
     printf '%s\n' "$1" > "$state/commands/$session"
+    printf '%sx%s\n' "$columns" "$rows" > "$state/dimensions/$session"
     : > "$state/sessions/$session"
     leader_pane=%42
     printf '%s\n' "$session" > "$state/panes/$leader_pane"
@@ -250,7 +253,9 @@ assert_contains "$leader_command" 'exec'
 assert_contains "$leader_command" 'OMC_RUNTIME_V2=1'
 assert_contains "$leader_command" 'OMC_STATE_DIR='
 assert_contains "$leader_command" 'OMC_TEAM_WORKTREE_MODE=branch'
+assert_contains "$leader_command" 'OMC_TEAM_NO_RC=1'
 assert_contains "$leader_command" '--madmax'
+[ "$(<"${repo}-fake-tmux/dimensions/omc-qs-proto-sample-001")" = '240x60' ] || fail 'OMC leader tmux session did not reserve a wide startup surface'
 if printf '%s\n' "$leader_command" | rg -F -- 'omx ' >/dev/null; then
   fail 'OMC leader launch unexpectedly used omx'
 fi
@@ -381,5 +386,7 @@ assert_contains "$output" 'mode=recovery-required'
 test -d "$tmp_root/timeout-task-worktrees/omc-proto-sample-001" || fail 'timeout removed recovery worktree'
 git -C "$repo" show-ref --verify --quiet refs/heads/codex/omc-qs-proto-sample-001 || fail 'timeout removed recovery branch'
 test -f "${repo}-fake-tmux/sessions/omc-qs-proto-sample-001" || fail 'timeout removed recovery session'
+timeout_base=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/omc-task-state/proto-sample-001
+rg -n '"leader_pane": "%42"' "$timeout_base/launch.json" >/dev/null || fail 'timeout launch state omitted the recoverable leader pane'
 
 printf 'PASS start-omc-task persistent-leader stable-refer-fingerprint cwd-cleanup dry-run dependency dirty duplicate lock failure timeout\n'

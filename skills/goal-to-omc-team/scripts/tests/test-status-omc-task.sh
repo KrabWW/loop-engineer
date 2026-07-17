@@ -54,6 +54,7 @@ case "${1:-}" in
         case "$op" in
           get-summary)
             if [ ! -d "$team_dir/workers" ]; then printf '{"ok":false,"operation":"get-summary","data":{}}\n'; exit 0; fi
+            if [ -f "$team_dir/unregistered" ]; then printf '{"ok":false,"operation":"get-summary","error":{"code":"team_not_found"}}\n'; exit 0; fi
             if [ -f "$team_dir/terminal" ]; then
               printf '{"ok":true,"data":{"summary":{"teamName":"%s","workerCount":1,"tasks":{"total":1,"pending":0,"blocked":0,"in_progress":0,"completed":1,"failed":0},"workers":[{"name":"worker-1","alive":true}],"nonReportingWorkers":[]}}}\n' "$name"
             else
@@ -89,7 +90,7 @@ case "${1:-}" in
   list-sessions) for f in "$state/sessions"/*; do [ -f "$f" ] && basename "$f"; done ;;
   new-session)
     shift; session=; cwd=; print_info=0; format=
-    while [ "$#" -gt 0 ]; do case "$1" in -d) shift;; -P) print_info=1; shift;; -F) format=$2; shift 2;; -s) session=$2; shift 2;; -c) cwd=$2; shift 2;; *) break;; esac; done
+    while [ "$#" -gt 0 ]; do case "$1" in -d) shift;; -P) print_info=1; shift;; -F) format=$2; shift 2;; -x|-y) shift 2;; -s) session=$2; shift 2;; -c) cwd=$2; shift 2;; *) break;; esac; done
     printf '%s\n' "$1" > "$state/commands/$session"
     : > "$state/sessions/$session"
     leader_pane=%42
@@ -162,24 +163,55 @@ assert_contains "$output" "state_base=$base"
 after=$(find "$base" -type f | sort | md5)
 [ "$before" = "$after" ] || fail 'status mutated team state'
 
+# --- duplicate state layouts must not trip pipefail/SIGPIPE (exit 141) ---
+repo=$(make_fixture duplicate-layout)
+run_in "$repo" ./scripts/start-omc-task PROTO-SAMPLE-001 >/dev/null
+dbase=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/omc-task-state/proto-sample-001
+for index in $(seq 1 1200); do
+  mkdir -p "$dbase/duplicate-layout-${index}/state/team/fake-team/workers"
+done
+mkdir -p "$tmp_root/duplicate-layout-task-worktrees/omc-proto-sample-001/.omc/state/team/fake-team/workers"
+set +e
+output=$(run_in "$repo" ./scripts/status-omc-task PROTO-SAMPLE-001 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "status should tolerate duplicate state layouts without SIGPIPE, got ${rc}"
+assert_contains "$output" 'team_name=fake-team'
+assert_contains "$output" 'phase=active'
+
 # --- no team ---
 repo=$(make_fixture noteam)
 if run_in "$repo" ./scripts/status-omc-task PROTO-SAMPLE-001 >/dev/null 2>&1; then
   fail 'status unexpectedly succeeded with no team state'
 fi
 
-# --- multiple teams (discovery ambiguity when launch.json team_name absent) ---
-repo=$(make_fixture multiteam)
-rm -f "$repo/.git/omc-task-state/proto-sample-001/launch.json"
+# --- stale retry directory: select the unique queryable team, never newest mtime ---
+repo=$(make_fixture stale-retry-team)
 run_in "$repo" ./scripts/start-omc-task PROTO-SAMPLE-001 >/dev/null
 mbase=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/omc-task-state/proto-sample-001
 mkdir -p "$mbase/fake-project/state/team/second-team/workers/worker-1"
 : > "$mbase/fake-project/state/team/second-team/workers/worker-1/.ready"
+: > "$mbase/fake-project/state/team/second-team/unregistered"
 rm -f "$mbase/launch.json"
-if output=$(run_in "$repo" ./scripts/status-omc-task PROTO-SAMPLE-001 2>&1); then
-  fail 'status unexpectedly succeeded with multiple teams and no launch.json'
-fi
+set +e
+output=$(run_in "$repo" ./scripts/status-omc-task PROTO-SAMPLE-001 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "status should select the unique queryable team, got ${rc}"
+assert_contains "$output" 'team_name=fake-team'
 assert_contains "$output" 'multiple OMC teams'
+
+# --- multiple queryable teams remain ambiguous and must fail closed ---
+repo=$(make_fixture multiple-live-teams)
+run_in "$repo" ./scripts/start-omc-task PROTO-SAMPLE-001 >/dev/null
+lbase=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/omc-task-state/proto-sample-001
+mkdir -p "$lbase/fake-project/state/team/second-team/workers/worker-1"
+: > "$lbase/fake-project/state/team/second-team/workers/worker-1/.ready"
+rm -f "$lbase/launch.json"
+if output=$(run_in "$repo" ./scripts/status-omc-task PROTO-SAMPLE-001 2>&1); then
+  fail 'status unexpectedly guessed between multiple queryable teams'
+fi
+assert_contains "$output" 'multiple live OMC teams'
 
 # --- stale heartbeat fail-closed (exit 2) ---
 repo=$(make_fixture stale)

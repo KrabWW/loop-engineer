@@ -17,7 +17,7 @@ Target the OMC `omc` CLI (not the Claude native `/team` skill and not OMX). Auth
 
 - Persistent leader: `omc launch --madmax --notify false "<leader-prompt>"` (no `omc exec`).
 - One atomic worker per Task: `omc team 1:claude:executor --auto-merge --no-decompose "<atomic-task>"`. `--no-decompose` assigns the same task text to every requested worker, so v1 always uses exactly one worker; parallelism is across independent Tasks in batch waves.
-- Runtime env on the leader and every child call: `OMC_RUNTIME_V2=1 OMC_STATE_DIR=<task-state-base> OMC_TEAM_WORKTREE_MODE=branch`. Auto-merge requires the leader branch to be neither `main` nor `master`.
+- Runtime env on the leader: `OMC_RUNTIME_V2=1 OMC_STATE_DIR=<task-state-base> OMC_TEAM_WORKTREE_MODE=branch OMC_TEAM_NO_RC=1`; child lifecycle calls use the first three bindings. Auto-merge requires the leader branch to be neither `main` nor `master`. Create the persistent tmux session at least `160x40` (the bundled launcher defaults to `240x60`) so OMC can verify long worker-start commands without narrow-pane wrapping false failures.
 - Progress: `omc team api get-summary`, `read-worker-status`, and `read-worker-heartbeat` (each `--input '<json>' --json`). There is no `team await`; poll on an interval.
 
 ## Workflow
@@ -30,7 +30,7 @@ Target the OMC `omc` CLI (not the Claude native `/team` skill and not OMX). Auth
 
 4. **Build the atomic DAG.** Each one-domain Task needs an ID, owner, dependencies, exact `Allowed Files`, non-goals, acceptance, and authoritative `Verification Commands`. Prove acyclicity and mark only unblocked Tasks `ready`.
 
-5. **Package OMC execution.** Freeze `one Task -> one integration branch (codex/omc-qs-<slug>) -> one integration worktree -> one persistent Claude leader -> one OMC team`. Capture the exact tmux leader pane. Team state is centralized under a Task-isolated base (`<git-common-dir>/omc-task-state/<slug>`, passed as `OMC_STATE_DIR`); the leader and all lifecycle calls bind the same runtime env.
+5. **Package OMC execution.** Freeze `one Task -> one integration branch (codex/omc-qs-<slug>) -> one integration worktree -> one persistent Claude leader -> one OMC team`. Capture the exact tmux leader pane and persist it immediately after session creation, before waiting for Team readiness, so a timeout remains recoverable. Team state is centralized under a Task-isolated base (`<git-common-dir>/omc-task-state/<slug>`, passed as `OMC_STATE_DIR`); the leader and all lifecycle calls bind the same runtime env.
 
 6. **Generate artifacts.** Follow [the contract](references/deliverable-contract.md): graph, Tasks, guide, launcher, status, resumable finisher, batch runner, installer, and fakes. The leader invokes exactly one `omc team 1:claude:executor --auto-merge --no-decompose` with one atomic sentence.
 
@@ -49,7 +49,7 @@ Run `scripts/install-omc-task-lifecycle <REPOSITORY>` to install start, status, 
 ./scripts/run-omc-task-batch --mode custom <PLAN_FILE>  # serial/parallel/custom waves
 ```
 
-Batch waves may run Teams in parallel but serialize shutdown, rebase, merge, and `main` integration. Never duplicate finisher internals in the batch runner.
+Batch waves may run Teams in parallel but serialize shutdown, rebase, merge, and `main` integration. A scheduler must preserve each starter's real exit code, must not hide it behind `| tail`, and must not let one slow starter prevent dispatch of other independent slots. Never duplicate finisher internals in the batch runner.
 
 ## Direction-changing stop conditions
 
@@ -63,7 +63,9 @@ Ask one question when evidence cannot determine execution semantics, durable own
 - Secrets in prompts, logs, browser storage, or ordinary fields.
 - A real Team starts during graph/launcher generation.
 - Startup reports success without a ready Team and the captured leader pane at `pane_dead=0`.
+- Startup creates a leader session without immediately persisting `leader_pane`, or uses a tmux pane narrower than `160x40`.
 - Finishing asks for a random Team name, scans outside the Task state base, uses plain rebase, omits any of the three verification runs, or trusts a stale worker heartbeat.
+- Recovery chooses among multiple Team directories by mtime or name. Query every candidate through exact state-base-bound `get-summary`; resume only when exactly one candidate is valid, and fail closed when multiple live Teams remain.
 - Batch runs finisher/main integration in parallel or crosses a custom wave barrier.
 - Lifecycle calls omit `OMC_RUNTIME_V2=1`, `OMC_STATE_DIR=<base>`, or `OMC_TEAM_WORKTREE_MODE=branch`.
 
