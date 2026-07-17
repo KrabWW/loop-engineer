@@ -1,0 +1,20 @@
+# OMC operational state
+.omc/
+# local MCP project config / logs
+.setting.projA/
+# superpowers worktrees
+.worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# editor
+.DS_Store
