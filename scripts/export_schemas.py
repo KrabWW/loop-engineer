@@ -26,6 +26,7 @@ from loop_engineer.contracts.provenance import ProvenanceManifest
 from loop_engineer.contracts.recovery import RecoveryRecord
 from loop_engineer.contracts.task import Task
 from loop_engineer.contracts.task_run import TaskBoardEntry
+from loop_engineer.scheduler.models import TaskExecutionMeta
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas" / "v1"
@@ -46,6 +47,7 @@ MODELS = {
     "recovery": RecoveryRecord,
     "task_board_entry": TaskBoardEntry,
     "provenance": ProvenanceManifest,
+    "task_execution_meta": TaskExecutionMeta,
 }
 
 

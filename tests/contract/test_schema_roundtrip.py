@@ -88,6 +88,7 @@ PAYLOADS = {
     },
     "task_board_entry": {"task_id": "T1"},
     "provenance": {"entries": []},
+    "task_execution_meta": {"task_id": "T1"},
 }
 
 

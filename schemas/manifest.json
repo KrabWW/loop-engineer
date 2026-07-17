@@ -69,6 +69,11 @@
       "file": "v1/task_board_entry.schema.json",
       "sha256": "9580aae00ab9ae98701ad6867e438dbc96b99fd4a6ad604d10612d66a7b51915",
       "version": 1
+    },
+    "task_execution_meta": {
+      "file": "v1/task_execution_meta.schema.json",
+      "sha256": "f8ce6b51d5b388bac3958a94cf33183f3e64003a5fe84f93ecbaf12f92e87b5b",
+      "version": 1
     }
   },
   "version": 1

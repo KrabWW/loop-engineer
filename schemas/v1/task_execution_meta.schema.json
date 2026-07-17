@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "Provider": {
+      "enum": [
+        "omx",
+        "omc"
+      ],
+      "title": "Provider",
+      "type": "string"
+    }
+  },
+  "description": "Optional per-Task metadata for conflict dimensions P2a's Task does not carry.\n\nThis is a separate planner input; it is NOT added to GoalDefinition.",
+  "properties": {
+    "browser_profile": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Browser Profile"
+    },
+    "db_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Db Name"
+    },
+    "engine_hint": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provider"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "migration_after": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Migration After",
+      "type": "array"
+    },
+    "migration_dir": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Migration Dir"
+    },
+    "ports": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Ports",
+      "type": "array"
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "title": "TaskExecutionMeta",
+  "type": "object"
+}
