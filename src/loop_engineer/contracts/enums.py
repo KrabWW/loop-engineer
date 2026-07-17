@@ -1,7 +1,8 @@
 """Frozen enums for exit codes and the Hybrid lifecycle (spec §4, §7.3, §7.4).
 
-Adding a value here is a wire-format change: bump SCHEMA_VERSION in every
-envelope that carries one of these enums and regenerate schemas/.
+Adding a value here is a wire-format change: regenerate schemas/ with
+`python scripts/export_schemas.py` and commit the diff. The drift test
+(tests/contract/test_schema_freeze_drift.py) fails until you do.
 """
 
 from enum import IntEnum, StrEnum

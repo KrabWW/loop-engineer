@@ -10,8 +10,9 @@ from loop_engineer.contracts.enums import (
     ExitCode,
     OmxTaskStatus,
 )
+from loop_engineer.contracts.event import EventEnvelope
 from loop_engineer.contracts.evidence import Evidence, EvidenceType
-from loop_engineer.contracts.fence import FencingProof, WriterFence
+from loop_engineer.contracts.fence import FencingProof, ProcessGroupIdentity, WriterFence
 from loop_engineer.contracts.goal import Goal, Milestone
 from loop_engineer.contracts.handoff import Handoff
 from loop_engineer.contracts.lease import Lease
@@ -22,8 +23,9 @@ from loop_engineer.contracts.task import Task, VerificationSpec
 
 __all__ = [
     "Claim", "CommandEnvelope", "CommandType", "CommonState", "EventType",
-    "ExecutorState", "ExitCode", "OmxTaskStatus", "Evidence", "EvidenceType",
-    "FencingProof", "WriterFence", "Goal", "Milestone", "Handoff", "Lease",
+    "EventEnvelope", "ExecutorState", "ExitCode", "OmxTaskStatus",
+    "Evidence", "EvidenceType", "FencingProof", "ProcessGroupIdentity",
+    "WriterFence", "Goal", "Milestone", "Handoff", "Lease",
     "DependencyEdge", "Plan", "TaskNode", "Wave", "ProvenanceEntry",
     "ProvenanceManifest", "RecoveryRecord", "Task", "VerificationSpec",
 ]
