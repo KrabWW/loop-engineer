@@ -43,3 +43,9 @@ def test_plan_validate_ok(tmp_path):
     out = tmp_path / "plan.json"
     main(["plan", "build", str(goal), "-o", str(out)])
     assert main(["plan", "validate", str(out)]) == int(ExitCode.OK)
+
+
+def test_plan_validate_bad(tmp_path):
+    bad = tmp_path / "plan.json"
+    bad.write_text("{}")
+    assert main(["plan", "validate", str(bad)]) == int(ExitCode.INVALID_INPUT)
