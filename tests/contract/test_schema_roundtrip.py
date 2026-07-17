@@ -20,6 +20,19 @@ PAYLOADS = {
         "exclusions": [], "stop_conditions": [],
         "milestones": [{"id": "M", "title": "m", "evidence_condition": "c"}],
     },
+    "goal_definition": {
+        "goal": {
+            "id": "G", "title": "t", "measurable_evidence": "ok", "scope": ["x"],
+            "exclusions": [], "stop_conditions": [],
+            "milestones": [{"id": "M", "title": "m", "evidence_condition": "c"}],
+        },
+        "tasks": [{
+            "id": "T", "owner_domain": "omx", "status": "pending", "dependencies": [],
+            "allowed_files": ["src/a.py"], "non_goals": [], "acceptance_criteria": ["x"],
+            "verification": {"commands": ["t"], "working_dir": "."},
+            "required_evidence": ["c"], "downstream_handoff": [],
+        }],
+    },
     "task": {
         "id": "T", "owner_domain": "omx", "status": "pending", "dependencies": [],
         "allowed_files": ["src/a.py"], "non_goals": [], "acceptance_criteria": ["x"],
@@ -73,6 +86,7 @@ PAYLOADS = {
         "last_event_sequence": 1, "journal_checksum": f"sha256:{_HEX64}",
         "current_phase": "omc_executing", "writer_fencing_generation": 0, "shutdown_acks": [],
     },
+    "task_board_entry": {"task_id": "T1"},
     "provenance": {"entries": []},
 }
 

@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from loop_engineer.compiler.definition import GoalDefinition
 from loop_engineer.contracts.claim import Claim
 from loop_engineer.contracts.command import CommandEnvelope
 from loop_engineer.contracts.event import EventEnvelope
@@ -24,6 +25,7 @@ from loop_engineer.contracts.plan import Plan
 from loop_engineer.contracts.provenance import ProvenanceManifest
 from loop_engineer.contracts.recovery import RecoveryRecord
 from loop_engineer.contracts.task import Task
+from loop_engineer.contracts.task_run import TaskBoardEntry
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas" / "v1"
@@ -31,6 +33,7 @@ MANIFEST = ROOT / "schemas" / "manifest.json"
 
 MODELS = {
     "goal": Goal,
+    "goal_definition": GoalDefinition,
     "task": Task,
     "plan": Plan,
     "command": CommandEnvelope,
@@ -41,6 +44,7 @@ MODELS = {
     "handoff": Handoff,
     "fence": WriterFence,
     "recovery": RecoveryRecord,
+    "task_board_entry": TaskBoardEntry,
     "provenance": ProvenanceManifest,
 }
 

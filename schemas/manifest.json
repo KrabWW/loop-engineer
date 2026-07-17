@@ -30,6 +30,11 @@
       "sha256": "2fb5dbea4070d0d289d3d73e4671541f4fa1f43f19466f6ed3b64f3a50942c6e",
       "version": 1
     },
+    "goal_definition": {
+      "file": "v1/goal_definition.schema.json",
+      "sha256": "5c0020831048e6e2db5b32495fecda7671a16f95f4aad840ad50c08fa6451973",
+      "version": 1
+    },
     "handoff": {
       "file": "v1/handoff.schema.json",
       "sha256": "e9582d44f7b5aef7f68672dd0e5c6bc5522a02cecdf5467b73f6a496dfab6288",
@@ -58,6 +63,11 @@
     "task": {
       "file": "v1/task.schema.json",
       "sha256": "0bbef8d919bba4031bdbc6dc61b183ec0f3048320d98f00a3d60591b8f9acc47",
+      "version": 1
+    },
+    "task_board_entry": {
+      "file": "v1/task_board_entry.schema.json",
+      "sha256": "9580aae00ab9ae98701ad6867e438dbc96b99fd4a6ad604d10612d66a7b51915",
       "version": 1
     }
   },

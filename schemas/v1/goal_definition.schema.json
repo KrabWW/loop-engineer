@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "Goal": {
+      "properties": {
+        "exclusions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "measurable_evidence": {
+          "minLength": 1,
+          "title": "Measurable Evidence",
+          "type": "string"
+        },
+        "milestones": {
+          "items": {
+            "$ref": "#/$defs/Milestone"
+          },
+          "minItems": 1,
+          "title": "Milestones",
+          "type": "array"
+        },
+        "scope": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Scope",
+          "type": "array"
+        },
+        "stop_conditions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Stop Conditions",
+          "type": "array"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "measurable_evidence",
+        "scope",
+        "milestones"
+      ],
+      "title": "Goal",
+      "type": "object"
+    },
+    "Milestone": {
+      "description": "A release gate. Exit is binary: evidence condition met or not.",
+      "properties": {
+        "evidence_condition": {
+          "minLength": 1,
+          "title": "Evidence Condition",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "evidence_condition"
+      ],
+      "title": "Milestone",
+      "type": "object"
+    },
+    "OmxTaskStatus": {
+      "description": "OMX worker Task status column (spec \u00a77.3).",
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "OmxTaskStatus",
+      "type": "string"
+    },
+    "Task": {
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "allowed_files": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Files",
+          "type": "array"
+        },
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "downstream_handoff": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Downstream Handoff",
+          "type": "array"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "non_goals": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Non Goals",
+          "type": "array"
+        },
+        "owner_domain": {
+          "minLength": 1,
+          "title": "Owner Domain",
+          "type": "string"
+        },
+        "required_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Required Evidence",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/OmxTaskStatus",
+          "default": "pending"
+        },
+        "verification": {
+          "$ref": "#/$defs/VerificationSpec"
+        }
+      },
+      "required": [
+        "id",
+        "owner_domain",
+        "allowed_files",
+        "acceptance_criteria",
+        "verification",
+        "required_evidence"
+      ],
+      "title": "Task",
+      "type": "object"
+    },
+    "VerificationSpec": {
+      "properties": {
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Commands",
+          "type": "array"
+        },
+        "working_dir": {
+          "minLength": 1,
+          "title": "Working Dir",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commands",
+        "working_dir"
+      ],
+      "title": "VerificationSpec",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "goal": {
+      "$ref": "#/$defs/Goal"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/Task"
+      },
+      "minItems": 1,
+      "title": "Tasks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "goal",
+    "tasks"
+  ],
+  "title": "GoalDefinition",
+  "type": "object"
+}

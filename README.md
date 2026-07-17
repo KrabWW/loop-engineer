@@ -37,3 +37,16 @@ python scripts/export_schemas.py
 
 The drift test (`tests/contract/test_schema_freeze_drift.py`) fails until the
 regenerated files are committed, so every schema change shows up in review.
+
+## Compile a goal and claim Tasks (P2a)
+
+```bash
+loop-engineer plan build goal.yaml -o plan.json
+loop-engineer task init plan.json
+loop-engineer task claim T1 --provider omx   # prints a claim token once
+loop-engineer task list
+```
+
+The task board lives under `.git/loop-engineer/<run-id>/board.json`. OMX and OMC
+workers can claim disjoint Tasks in parallel; overlapping `Allowed Files` are
+rejected unless the Tasks are dependency-ordered.
