@@ -4,7 +4,7 @@ from loop_engineer.contracts.lease import Lease
 from loop_engineer.contracts.plan import DependencyEdge, Plan, TaskNode
 from loop_engineer.contracts.provider import Provider
 from loop_engineer.contracts.task import Task, VerificationSpec
-from loop_engineer.runtime.board import BoardStore, PriorStateError
+from loop_engineer.runtime.board import BoardStore, PriorStateError, ScopeOverlapError
 
 
 def _plan(task_files: dict[str, list[str]], deps: dict[str, list[str]] | None = None) -> Plan:
@@ -65,3 +65,31 @@ def test_claim_wrong_prior_state_raises(tmp_path):
     store.claim("T1", Provider.OMX, _LEASE)
     with pytest.raises(PriorStateError):
         store.claim("T1", Provider.OMC, _LEASE)
+
+
+def test_claim_overlapping_disjoint_tasks_both_ok(tmp_path):
+    plan = _plan({"T1": ["src/a.py"], "T2": ["src/b.py"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    store.claim("T1", Provider.OMX, _LEASE)
+    store.claim("T2", Provider.OMC, _LEASE)  # disjoint files -> ok in parallel
+    s = store.load_state()
+    assert s.tasks["T1"].provider == Provider.OMX
+    assert s.tasks["T2"].provider == Provider.OMC
+
+
+def test_claim_overlapping_files_rejected(tmp_path):
+    plan = _plan({"T1": ["src/a.py"], "T2": ["src/a.py"]})  # same file, no dep
+    store = BoardStore.from_plan(plan, tmp_path)
+    store.claim("T1", Provider.OMX, _LEASE)
+    with pytest.raises(ScopeOverlapError):
+        store.claim("T2", Provider.OMC, _LEASE)
+
+
+def test_claim_overlap_allowed_when_dependency_ordered(tmp_path):
+    # T2 depends on T1; both touch src/a.py. T1 claimed first; T2 overlap is
+    # legal because T2 is a descendant of T1 (independent Tasks may overlap when ordered).
+    plan = _plan({"T1": ["src/a.py"], "T2": ["src/a.py"]}, deps={"T2": ["T1"]})
+    store = BoardStore.from_plan(plan, tmp_path)
+    store.claim("T1", Provider.OMX, _LEASE)
+    token = store.claim("T2", Provider.OMC, _LEASE)
+    assert isinstance(token, str)
