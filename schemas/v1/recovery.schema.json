@@ -1,0 +1,281 @@
+{
+  "properties": {
+    "adapter_exec_branch": {
+      "minLength": 1,
+      "title": "Adapter Exec Branch",
+      "type": "string"
+    },
+    "adapter_exec_worktree": {
+      "minLength": 1,
+      "title": "Adapter Exec Worktree",
+      "type": "string"
+    },
+    "base_commit": {
+      "minLength": 1,
+      "title": "Base Commit",
+      "type": "string"
+    },
+    "claim_token_digest": {
+      "minLength": 1,
+      "title": "Claim Token Digest",
+      "type": "string"
+    },
+    "claude_leader_executable": {
+      "minLength": 1,
+      "title": "Claude Leader Executable",
+      "type": "string"
+    },
+    "claude_leader_pane": {
+      "minLength": 1,
+      "title": "Claude Leader Pane",
+      "type": "string"
+    },
+    "claude_leader_pid": {
+      "minimum": 1,
+      "title": "Claude Leader Pid",
+      "type": "integer"
+    },
+    "claude_leader_session": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claude Leader Session"
+    },
+    "claude_leader_start_time": {
+      "minLength": 1,
+      "title": "Claude Leader Start Time",
+      "type": "string"
+    },
+    "cleanup_phase": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cleanup Phase"
+    },
+    "current_phase": {
+      "minLength": 1,
+      "title": "Current Phase",
+      "type": "string"
+    },
+    "integration_branch": {
+      "minLength": 1,
+      "title": "Integration Branch",
+      "type": "string"
+    },
+    "integration_worktree": {
+      "minLength": 1,
+      "title": "Integration Worktree",
+      "type": "string"
+    },
+    "journal_checksum": {
+      "minLength": 1,
+      "title": "Journal Checksum",
+      "type": "string"
+    },
+    "lane": {
+      "minLength": 1,
+      "title": "Lane",
+      "type": "string"
+    },
+    "last_command_revision": {
+      "minimum": 1,
+      "title": "Last Command Revision",
+      "type": "integer"
+    },
+    "last_event_sequence": {
+      "minimum": 1,
+      "title": "Last Event Sequence",
+      "type": "integer"
+    },
+    "last_summary_revision": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Summary Revision"
+    },
+    "leader_pane": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Leader Pane"
+    },
+    "leader_session": {
+      "minLength": 1,
+      "title": "Leader Session",
+      "type": "string"
+    },
+    "lease_expiry": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Lease Expiry"
+    },
+    "lease_generation": {
+      "minimum": 0,
+      "title": "Lease Generation",
+      "type": "integer"
+    },
+    "omc_state_root": {
+      "minLength": 1,
+      "title": "Omc State Root",
+      "type": "string"
+    },
+    "omc_team_name": {
+      "minLength": 1,
+      "title": "Omc Team Name",
+      "type": "string"
+    },
+    "omc_worker_identities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Omc Worker Identities",
+      "type": "array"
+    },
+    "omx_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Omx Task Id"
+    },
+    "omx_team_name": {
+      "minLength": 1,
+      "title": "Omx Team Name",
+      "type": "string"
+    },
+    "pinned_result_commit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pinned Result Commit"
+    },
+    "protocol_version": {
+      "minimum": 1,
+      "title": "Protocol Version",
+      "type": "integer"
+    },
+    "provider_task_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Provider Task Ids",
+      "type": "array"
+    },
+    "repo_identity": {
+      "minLength": 1,
+      "title": "Repo Identity",
+      "type": "string"
+    },
+    "review_base_commit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Review Base Commit"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "shutdown_acks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Shutdown Acks",
+      "type": "array"
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "worker_identity": {
+      "minLength": 1,
+      "title": "Worker Identity",
+      "type": "string"
+    },
+    "writer_fencing_generation": {
+      "minimum": 0,
+      "title": "Writer Fencing Generation",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "repo_identity",
+    "run_id",
+    "task_id",
+    "lane",
+    "protocol_version",
+    "base_commit",
+    "integration_branch",
+    "integration_worktree",
+    "adapter_exec_branch",
+    "adapter_exec_worktree",
+    "omx_team_name",
+    "leader_session",
+    "worker_identity",
+    "claim_token_digest",
+    "lease_generation",
+    "claude_leader_pane",
+    "claude_leader_pid",
+    "claude_leader_start_time",
+    "claude_leader_executable",
+    "omc_state_root",
+    "omc_team_name",
+    "last_command_revision",
+    "last_event_sequence",
+    "journal_checksum",
+    "current_phase",
+    "writer_fencing_generation"
+  ],
+  "title": "RecoveryRecord",
+  "type": "object"
+}

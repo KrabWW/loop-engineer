@@ -1,0 +1,49 @@
+{
+  "$defs": {
+    "EvidenceType": {
+      "enum": [
+        "commit",
+        "test_run",
+        "verification_run",
+        "scope_proof",
+        "tree_hash"
+      ],
+      "title": "EvidenceType",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "digest": {
+      "minLength": 1,
+      "title": "Digest",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/EvidenceType"
+    },
+    "produced_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Produced At"
+    },
+    "ref": {
+      "minLength": 1,
+      "title": "Ref",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "digest",
+    "ref"
+  ],
+  "title": "Evidence",
+  "type": "object"
+}

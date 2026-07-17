@@ -1,0 +1,64 @@
+{
+  "$defs": {
+    "ProvenanceEntry": {
+      "properties": {
+        "approved": {
+          "default": false,
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "imported_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Imported At"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "source_license": {
+          "minLength": 1,
+          "title": "Source License",
+          "type": "string"
+        },
+        "source_origin": {
+          "minLength": 1,
+          "title": "Source Origin",
+          "type": "string"
+        },
+        "transformation": {
+          "minLength": 1,
+          "title": "Transformation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source_origin",
+        "source_license",
+        "transformation"
+      ],
+      "title": "ProvenanceEntry",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/ProvenanceEntry"
+      },
+      "title": "Entries",
+      "type": "array"
+    }
+  },
+  "title": "ProvenanceManifest",
+  "type": "object"
+}

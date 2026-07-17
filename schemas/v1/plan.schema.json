@@ -1,0 +1,173 @@
+{
+  "$defs": {
+    "DependencyEdge": {
+      "properties": {
+        "from_id": {
+          "title": "From Id",
+          "type": "string"
+        },
+        "to_id": {
+          "title": "To Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_id",
+        "to_id"
+      ],
+      "title": "DependencyEdge",
+      "type": "object"
+    },
+    "OmxTaskStatus": {
+      "description": "OMX worker Task status column (spec \u00a77.3).",
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "OmxTaskStatus",
+      "type": "string"
+    },
+    "Task": {
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "allowed_files": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Files",
+          "type": "array"
+        },
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "downstream_handoff": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Downstream Handoff",
+          "type": "array"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "non_goals": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Non Goals",
+          "type": "array"
+        },
+        "owner_domain": {
+          "minLength": 1,
+          "title": "Owner Domain",
+          "type": "string"
+        },
+        "required_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Required Evidence",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/OmxTaskStatus",
+          "default": "pending"
+        },
+        "verification": {
+          "$ref": "#/$defs/VerificationSpec"
+        }
+      },
+      "required": [
+        "id",
+        "owner_domain",
+        "allowed_files",
+        "acceptance_criteria",
+        "verification",
+        "required_evidence"
+      ],
+      "title": "Task",
+      "type": "object"
+    },
+    "TaskNode": {
+      "properties": {
+        "task": {
+          "$ref": "#/$defs/Task"
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "title": "TaskNode",
+      "type": "object"
+    },
+    "VerificationSpec": {
+      "properties": {
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Commands",
+          "type": "array"
+        },
+        "working_dir": {
+          "minLength": 1,
+          "title": "Working Dir",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commands",
+        "working_dir"
+      ],
+      "title": "VerificationSpec",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "edges": {
+      "items": {
+        "$ref": "#/$defs/DependencyEdge"
+      },
+      "title": "Edges",
+      "type": "array"
+    },
+    "goal_id": {
+      "minLength": 1,
+      "title": "Goal Id",
+      "type": "string"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/TaskNode"
+      },
+      "minItems": 1,
+      "title": "Nodes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "goal_id",
+    "nodes"
+  ],
+  "title": "Plan",
+  "type": "object"
+}

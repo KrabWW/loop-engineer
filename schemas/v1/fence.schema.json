@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "FencingProof": {
+      "properties": {
+        "absence_proofs": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Absence Proofs",
+          "type": "array"
+        },
+        "integration_tree_hash": {
+          "minLength": 1,
+          "title": "Integration Tree Hash",
+          "type": "string"
+        },
+        "provider_process_group": {
+          "items": {
+            "$ref": "#/$defs/ProcessGroupIdentity"
+          },
+          "minItems": 1,
+          "title": "Provider Process Group",
+          "type": "array"
+        },
+        "provider_worktrees_clean": {
+          "title": "Provider Worktrees Clean",
+          "type": "boolean"
+        },
+        "result_tree_hash": {
+          "minLength": 1,
+          "title": "Result Tree Hash",
+          "type": "string"
+        },
+        "shutdown_acks": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Shutdown Acks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider_process_group",
+        "shutdown_acks",
+        "absence_proofs",
+        "provider_worktrees_clean",
+        "result_tree_hash",
+        "integration_tree_hash"
+      ],
+      "title": "FencingProof",
+      "type": "object"
+    },
+    "ProcessGroupIdentity": {
+      "properties": {
+        "executable": {
+          "minLength": 1,
+          "title": "Executable",
+          "type": "string"
+        },
+        "pid": {
+          "minimum": 1,
+          "title": "Pid",
+          "type": "integer"
+        },
+        "start_time": {
+          "minLength": 1,
+          "title": "Start Time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "start_time",
+        "executable"
+      ],
+      "title": "ProcessGroupIdentity",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "fenced_paths": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Fenced Paths",
+      "type": "array"
+    },
+    "proof": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FencingProof"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "writer_generation": {
+      "minimum": 0,
+      "title": "Writer Generation",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "writer_generation",
+    "fenced_paths"
+  ],
+  "title": "WriterFence",
+  "type": "object"
+}
