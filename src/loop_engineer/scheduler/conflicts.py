@@ -60,4 +60,38 @@ def conflicts_for(
                 candidate=candidate_id, other=other_id, dimension=ConflictDimension.ALLOWED_FILES,
                 reason="allowed_files overlap",
             ))
+        cmeta = meta_map.get(candidate_id)
+        ometa = meta_map.get(other_id)
+        # C. migration
+        if cmeta and ometa and cmeta.migration_dir and cmeta.migration_dir == ometa.migration_dir:
+            out.append(Conflict(
+                candidate=candidate_id, other=other_id,
+                dimension=ConflictDimension.MIGRATION,
+                reason=f"shared migration_dir {cmeta.migration_dir}",
+            ))
+        elif cmeta and ometa and (set(cmeta.migration_after) & set(ometa.migration_after)):
+            out.append(Conflict(
+                candidate=candidate_id, other=other_id,
+                dimension=ConflictDimension.MIGRATION,
+                reason="shared migration_after precursor",
+            ))
+        # D. resource
+        if cmeta and ometa:
+            if set(cmeta.ports) & set(ometa.ports):
+                out.append(Conflict(
+                    candidate=candidate_id, other=other_id,
+                    dimension=ConflictDimension.RESOURCE, reason="port clash",
+                ))
+            if cmeta.db_name and cmeta.db_name == ometa.db_name:
+                out.append(Conflict(
+                    candidate=candidate_id, other=other_id,
+                    dimension=ConflictDimension.RESOURCE,
+                    reason=f"exclusive db {cmeta.db_name}",
+                ))
+            if cmeta.browser_profile and cmeta.browser_profile == ometa.browser_profile:
+                out.append(Conflict(
+                    candidate=candidate_id, other=other_id,
+                    dimension=ConflictDimension.RESOURCE,
+                    reason=f"exclusive browser_profile {cmeta.browser_profile}",
+                ))
     return out

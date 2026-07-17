@@ -4,7 +4,7 @@ from loop_engineer.contracts.task import Task, VerificationSpec
 from loop_engineer.contracts.task_run import TaskBoardEntry, TaskRunStatus
 from loop_engineer.runtime.board import BoardState
 from loop_engineer.scheduler.conflicts import conflicts_for
-from loop_engineer.scheduler.models import ConflictDimension
+from loop_engineer.scheduler.models import ConflictDimension, TaskExecutionMeta
 
 
 def _task(tid, deps=None, files=None):
@@ -48,3 +48,47 @@ def test_allowed_files_conflict_allowed_when_dependency_ordered():
     confs = conflicts_for("T2", plan, board, {})
     # T2 depends on T1 -> ordered overlap allowed; no ALLOWED_FILES conflict
     assert not any(c.dimension == ConflictDimension.ALLOWED_FILES for c in confs)
+
+
+def test_migration_same_dir_conflict():
+    plan = _plan([_task("T1"), _task("T2")])
+    board = _board(["T1"])
+    meta = {"T2": TaskExecutionMeta(task_id="T2", migration_dir="migrations/versions"),
+            "T1": TaskExecutionMeta(task_id="T1", migration_dir="migrations/versions")}
+    confs = conflicts_for("T2", plan, board, meta)
+    assert any(c.dimension == ConflictDimension.MIGRATION for c in confs)
+
+
+def test_resource_port_conflict():
+    plan = _plan([_task("T1"), _task("T2")])
+    board = _board(["T1"])
+    meta = {"T1": TaskExecutionMeta(task_id="T1", ports=[8000]),
+            "T2": TaskExecutionMeta(task_id="T2", ports=[8000])}
+    confs = conflicts_for("T2", plan, board, meta)
+    assert any(c.dimension == ConflictDimension.RESOURCE for c in confs)
+
+
+def test_resource_db_conflict():
+    plan = _plan([_task("T1"), _task("T2")])
+    board = _board(["T1"])
+    meta = {"T1": TaskExecutionMeta(task_id="T1", db_name="app"),
+            "T2": TaskExecutionMeta(task_id="T2", db_name="app")}
+    confs = conflicts_for("T2", plan, board, meta)
+    assert any(c.dimension == ConflictDimension.RESOURCE for c in confs)
+
+
+def test_resource_browser_profile_conflict():
+    plan = _plan([_task("T1"), _task("T2")])
+    board = _board(["T1"])
+    meta = {"T1": TaskExecutionMeta(task_id="T1", browser_profile="p"),
+            "T2": TaskExecutionMeta(task_id="T2", browser_profile="p")}
+    confs = conflicts_for("T2", plan, board, meta)
+    assert any(c.dimension == ConflictDimension.RESOURCE for c in confs)
+
+
+def test_no_conflict_disjoint_meta():
+    plan = _plan([_task("T1", files=["a.py"]), _task("T2", files=["b.py"])])
+    board = _board(["T1"])
+    meta = {"T1": TaskExecutionMeta(task_id="T1", ports=[8000], db_name="a"),
+            "T2": TaskExecutionMeta(task_id="T2", ports=[9000], db_name="b")}
+    assert conflicts_for("T2", plan, board, meta) == []
