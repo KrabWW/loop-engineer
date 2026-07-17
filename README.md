@@ -50,3 +50,14 @@ loop-engineer task list
 The task board lives under `.git/loop-engineer/<run-id>/board.json`. OMX and OMC
 workers can claim disjoint Tasks in parallel; overlapping `Allowed Files` are
 rejected unless the Tasks are dependency-ordered.
+
+## Scheduler planner (P2b-1)
+
+Pure-logic planner: given a compiled `Plan` + task board + per-task execution
+metadata, compute eligible Tasks, the conflict graph (dependency / allowed-files
+/ migration / resource / lifecycle / protected-zone), engine routing, and a
+capacity-respecting launch plan.
+
+```bash
+loop-engineer scheduler plan plan.json   # prints the LaunchPlan JSON
+```
