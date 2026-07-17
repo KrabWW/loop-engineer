@@ -370,6 +370,26 @@ leader_pane_alive() {
 
 team_name=
 status_json=
+persisted_candidate=
+
+persist_team_candidate_to_launch_state() {
+  candidate=$1
+  [ -n "$candidate" ] || return 0
+  python3 - "$launch_state_file" "$candidate" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+candidate = sys.argv[2]
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {}
+if data.get("team_name") != candidate:
+    data["team_name"] = candidate
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+PY
+}
 
 # Real OMC team state is a DIRECTORY under .../state/team/{teamName}/ (there is
 # no config.json). A team dir contains a workers/ subdir. The same team may
@@ -446,6 +466,17 @@ EOF
     fi
     team_name=$ready_team
     break
+  fi
+  # Persist the most recently observed candidate team to launch.json even
+  # before any team reaches the ready state. A later timeout then leaves
+  # launch.json usable for ./scripts/status-omc-task and finish-omc-task
+  # recovery instead of forcing the operator to inspect raw state dirs.
+  if [ "$candidate_count" -ge 1 ]; then
+    first_candidate=$(printf '%s\n' "$candidates" | awk 'NF { print; exit }')
+    if [ -n "$first_candidate" ] && [ "$first_candidate" != "$persisted_candidate" ]; then
+      persist_team_candidate_to_launch_state "$first_candidate"
+      persisted_candidate=$first_candidate
+    fi
   fi
   if ! leader_pane_alive; then
     if [ "$candidate_count" -eq 0 ]; then

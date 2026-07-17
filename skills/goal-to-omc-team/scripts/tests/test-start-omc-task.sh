@@ -292,7 +292,6 @@ launch_state="$success_base/launch.json"
 test -f "$launch_state" || fail 'success did not record launch state'
 rg -n '"derived_ready": false|"refer_fingerprint": "[0-9a-f]{64}"|"refer_fingerprint_version": "content-v2"' "$launch_state" >/dev/null || fail 'launch state omitted derived-ready, refer baseline, or version'
 test -z "$(git -C "$tmp_root/success-task-worktrees/omc-proto-sample-001" status --porcelain)" || fail 'success worktree is dirty'
-
 chunk_target="$tmp_root/chunk-target-tmux"
 chunk_log="$tmp_root/chunk-target.log"
 cat > "$chunk_target" <<'CHUNK_TARGET'
@@ -321,7 +320,6 @@ python3 - "$staged_script" <<'PY'
 from pathlib import Path
 import stat
 import sys
-
 mode = stat.S_IMODE(Path(sys.argv[1]).stat().st_mode)
 if mode != 0o700:
     raise SystemExit(f"tmux shim worker launcher mode is {mode:o}, expected 700")
@@ -455,4 +453,55 @@ test -f "${repo}-fake-tmux/sessions/omc-qs-proto-sample-001" || fail 'timeout re
 timeout_base=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/omc-task-state/proto-sample-001
 rg -n '"leader_pane": "%42"' "$timeout_base/launch.json" >/dev/null || fail 'timeout launch state omitted the recoverable leader pane'
 
-printf 'PASS start-omc-task persistent-leader stable-refer-fingerprint cwd-cleanup dry-run dependency dirty duplicate lock failure timeout\n'
+# --- regression: partial-launch persists the discovered team_name to launch.json
+# --- even when summary_is_ready never passes (worker.alive=false) within the timeout.
+# --- Without this, ./scripts/status-omc-task cannot recover because launch.json lacks team_name.
+repo=$(make_fixture partial-team)
+# Override fake omc: creates team dir + heartbeat but reports workers[0].alive=false
+# and nonReportingWorkers=[worker-1] so summary_is_ready never returns true.
+cat > "$tmp_root/fake-bin/omc" <<'OMC_PARTIAL'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  -V|--version) printf 'fake omc 0.0\n'; exit 0 ;;
+  doctor) exit 0 ;;
+  launch)
+    : > "${FAKE_OMC_RAN:?}"
+    base=${OMC_STATE_DIR:?}
+    team_dir="$base/fake-project/state/team/fake-team"
+    mkdir -p "$team_dir/workers/worker-1"
+    : > "$team_dir/workers/worker-1/.ready"
+    printf '{"worker":"worker-1","ts":%s}\n' "$(date +%s)" > "$team_dir/workers/worker-1/heartbeat.json"
+    exit 0 ;;
+  team)
+    sub=${2:-}
+    case "$sub" in
+      api)
+        op=${3:-}
+        input=
+        while [ "$#" -gt 0 ]; do case "$1" in --input) input=$2; break ;; esac; shift; done
+        name=$(printf '%s\n' "$input" | sed -n 's/.*"team_name":"\([^"]*\)".*/\1/p')
+        case "$op" in
+          get-summary)
+            printf '{"ok":true,"operation":"get-summary","data":{"summary":{"teamName":"%s","workerCount":1,"tasks":{"total":1,"pending":1,"blocked":0,"in_progress":0,"completed":0,"failed":0},"workers":[{"name":"worker-1","alive":false}],"nonReportingWorkers":["worker-1"]}}}\n' "$name" ;;
+          read-worker-heartbeat)
+            printf '{"ok":true,"data":{"worker":"worker-1","heartbeat":{"ts":%s}}}\n' "$(date +%s)" ;;
+          *) exit 0 ;;
+        esac ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+OMC_PARTIAL
+chmod +x "$tmp_root/fake-bin/omc"
+if output=$(run_launcher "$repo" PROTO-SAMPLE-001 2>&1); then
+  fail 'partial-team launch unexpectedly succeeded with never-ready worker'
+fi
+assert_contains "$output" 'persistent Claude leader did not produce a ready OMC team within 2 seconds'
+assert_contains "$output" 'mode=recovery-required'
+partial_base=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/omc-task-state/proto-sample-001
+launch_state="$partial_base/launch.json"
+test -f "$launch_state" || fail 'partial-team timeout did not persist launch.json'
+rg -n '"team_name": "fake-team"' "$launch_state" >/dev/null || fail 'partial-team timeout did not capture the discovered team_name in launch.json'
+
+printf 'PASS start-omc-task persistent-leader stable-refer-fingerprint cwd-cleanup dry-run dependency dirty duplicate lock failure timeout partial-team\n'

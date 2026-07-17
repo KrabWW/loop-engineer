@@ -53,8 +53,6 @@ for ((index = 1; index < $#; index += 1)); do
   fi
 done
 
-# Only intercept the exact OMC literal form. Key-name sends and unusual
-# send-keys layouts continue through unchanged.
 if [ "$literal_index" -lt 0 ] || [ "$literal_index" -ne "$#" ]; then
   exec "$real_tmux" "$@"
 fi
@@ -87,9 +85,4 @@ PY
 )
 printf '%s' "$literal" > "$pending_command"
 printf '%s' "$launch_script" > "$pending_script"
-
-# The shell only receives a short path. While it is buffered, capture-pane is
-# proxied above with the original command so OMC's delivery verifier sees the
-# exact expected literal. Enter clears the proxy state and runs the private,
-# self-deleting launcher.
 exec "$real_tmux" send-keys -t "$target_pane" -l "$short_command"

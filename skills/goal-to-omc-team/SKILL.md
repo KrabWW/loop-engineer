@@ -30,7 +30,7 @@ Target the OMC `omc` CLI (not the Claude native `/team` skill and not OMX). Auth
 
 4. **Build the atomic DAG.** Each one-domain Task needs an ID, owner, dependencies, exact `Allowed Files`, non-goals, acceptance, and authoritative `Verification Commands`. Prove acyclicity and mark only unblocked Tasks `ready`.
 
-5. **Package OMC execution.** Freeze `one Task -> one integration branch (codex/omc-qs-<slug>) -> one integration worktree -> one persistent Claude leader -> one OMC team`. Capture the exact tmux leader pane and persist it immediately after session creation, before waiting for Team readiness, so a timeout remains recoverable. Team state is centralized under a Task-isolated base (`<git-common-dir>/omc-task-state/<slug>`, passed as `OMC_STATE_DIR`); the leader and all lifecycle calls bind the same runtime env.
+5. **Package OMC execution.** Freeze `one Task -> one integration branch (codex/omc-qs-<slug>) -> one integration worktree -> one persistent Claude leader -> one OMC team`. Capture the exact tmux leader pane immediately after session creation and persist the first discovered Team candidate before waiting for full worker readiness, so a timeout leaves both `leader_pane` and `team_name` recoverable. Team state is centralized under a Task-isolated base (`<git-common-dir>/omc-task-state/<slug>`, passed as `OMC_STATE_DIR`); the leader and all lifecycle calls bind the same runtime env.
 
 6. **Generate artifacts.** Follow [the contract](references/deliverable-contract.md): graph, Tasks, guide, launcher, status, resumable finisher, batch runner, installer, and fakes. The leader invokes exactly one `omc team 1:claude:executor --auto-merge --no-decompose` with one atomic sentence.
 
@@ -63,7 +63,7 @@ Ask one question when evidence cannot determine execution semantics, durable own
 - Secrets in prompts, logs, browser storage, or ordinary fields.
 - A real Team starts during graph/launcher generation.
 - Startup reports success without a ready Team and the captured leader pane at `pane_dead=0`.
-- Startup creates a leader session without immediately persisting `leader_pane`, omits the runtime tmux shim, or allows the `480x60` launch window to be resized before worker delivery.
+- Startup creates a leader session without immediately persisting `leader_pane`, observes a Team candidate without persisting `team_name`, omits the runtime tmux shim, or allows the `480x60` launch window to be resized before worker delivery.
 - Finishing asks for a random Team name, scans outside the Task state base, uses plain rebase, omits any of the three verification runs, or trusts a stale worker heartbeat.
 - Recovery chooses among multiple Team directories by mtime or name. Query every candidate through exact state-base-bound `get-summary`; resume only when exactly one candidate is valid, and fail closed when multiple live Teams remain.
 - Batch runs finisher/main integration in parallel or crosses a custom wave barrier.
